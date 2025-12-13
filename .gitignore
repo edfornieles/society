@@ -1,0 +1,21 @@
+# Next.js
+.next/
+out/
+
+# deps
+node_modules/
+
+# env / secrets
+.env
+.env.local
+.env.*.local
+
+# logs / debug
+.cursor/
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+
+

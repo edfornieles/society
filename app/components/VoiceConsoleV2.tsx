@@ -29,6 +29,9 @@ type BibleUpdate = {
 
 const VOICES = ["marin", "alloy", "verse", "aria", "ember"] as const;
 
+const DEFAULT_32BIT_STYLE_GUIDE =
+  "32-bit retro pixel art (SNES/PS1-era). Crisp pixels (no anti-aliasing), limited palette, subtle dithering, strong silhouettes, readable shapes. Cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
+
 export function VoiceConsoleV2() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -37,13 +40,13 @@ export function VoiceConsoleV2() {
   const [voice, setVoice] = useState<(typeof VOICES)[number]>("marin");
   const [playfulness, setPlayfulness] = useState<Playfulness>(2);
 
-  const { bible, setBible, images, setImages, setFinalRecord, setHistory } = useSociety();
+  const { bible, setBible, images, setImages, setSummary, setFinalRecord, setHistory } = useSociety();
   const [log, setLog] = useState<LogLine[]>([]);
   const [liveTranscript, setLiveTranscript] = useState<string>("");
   const [imageBusy, setImageBusy] = useState(false);
   const [autoImages, setAutoImages] = useState(true);
   const [autoEveryTurns, setAutoEveryTurns] = useState(1);
-  const [imageStyleGuide, setImageStyleGuide] = useState<string>("");
+  const [imageStyleGuide, setImageStyleGuide] = useState<string>(DEFAULT_32BIT_STYLE_GUIDE);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -360,10 +363,32 @@ export function VoiceConsoleV2() {
       if (topic === "recap") {
         const text = extractTextFromResponse(evt);
         const parsed = safeJsonParse<any>(text);
-        if (parsed?.canonRecap) {
-          addLog("sys", `Recap: ${parsed.canonRecap.join(" | ")}`);
+        const canonRecap: string[] = Array.isArray(parsed?.canonRecap)
+          ? (parsed.canonRecap as unknown[]).map((v) => String(v)).slice(0, 16)
+          : [];
+        const openThreads: string[] = Array.isArray(parsed?.openThreads)
+          ? (parsed.openThreads as unknown[]).map((v) => String(v)).slice(0, 12)
+          : [];
+        const nextMoves: string[] = Array.isArray(parsed?.nextMoves)
+          ? (parsed.nextMoves as unknown[]).map((v) => String(v)).slice(0, 8)
+          : [];
+
+        if (canonRecap.length || openThreads.length || nextMoves.length) {
+          const md = [
+            `## Summary so far`,
+            `**Updated**: ${new Date().toLocaleString()}`,
+            canonRecap.length ? `\n### Canon\n${canonRecap.map((x) => `- ${x.replaceAll("\n", " ").trim()}`).join("\n")}` : "",
+            openThreads.length ? `\n### Open threads\n${openThreads.map((x) => `- ${x.replaceAll("\n", " ").trim()}`).join("\n")}` : "",
+            nextMoves.length ? `\n### Suggested next moves\n${nextMoves.map((x) => `- ${x.replaceAll("\n", " ").trim()}`).join("\n")}` : "",
+            "",
+          ]
+            .filter(Boolean)
+            .join("\n");
+          setSummary(md);
+          addLog("sys", "Generated summary so far.");
         } else {
-          addLog("sys", `Recap (raw): ${text.slice(0, 600)}`);
+          setSummary(text);
+          addLog("sys", `Summary (raw): ${text.slice(0, 240)}`);
         }
       }
 
@@ -476,8 +501,7 @@ export function VoiceConsoleV2() {
         const styleGuide = String(parsed?.styleGuide ?? "");
         const prompt = String(parsed?.prompt ?? "");
         const negative = String(
-          parsed?.negativePrompt ??
-            "text, logos, watermark, nudity, sexual content, lingerie, nipples, genitals, gore, explicit violence"
+          parsed?.negativePrompt ?? "text, logos, watermark, explicit nudity, explicit sexual content, gore, graphic violence"
         );
 
         if (!prompt) {
@@ -606,8 +630,7 @@ export function VoiceConsoleV2() {
       const styleGuide = String(args?.styleGuide ?? "");
       const prompt = String(args?.prompt ?? "");
       const negative = String(
-        args?.negativePrompt ??
-          "text, logos, watermark, nudity, sexual content, lingerie, nipples, genitals, gore, explicit violence"
+        args?.negativePrompt ?? "text, logos, watermark, explicit nudity, explicit sexual content, gore, graphic violence"
       );
 
       if (!imageStyleGuide && styleGuide) setImageStyleGuide(styleGuide);
@@ -876,7 +899,7 @@ export function VoiceConsoleV2() {
 
       <div className="kv">
         <button onClick={onRecap} disabled={!connected}>
-          Recap
+          Generate summary
         </button>
         <button onClick={onUndo}>
           Undo last canon line

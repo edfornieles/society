@@ -5,7 +5,7 @@ import { useSociety } from "./SocietyContext";
 import { getGame, listGames } from "@/lib/gameHistory";
 
 export function SessionPickerV2({ disabled }: { disabled?: boolean }) {
-  const { history, setHistory, setBible, setImages, setFinalRecord } = useSociety();
+  const { history, setHistory, setBible, setImages, setFinalRecord, setSummary } = useSociety();
   const [selectedId, setSelectedId] = useState<string>("");
   const [loading, setLoading] = useState(false);
 
@@ -26,6 +26,7 @@ export function SessionPickerV2({ disabled }: { disabled?: boolean }) {
       setBible(g.bible);
       setImages(g.images);
       setFinalRecord(g.finalRecordText ?? "");
+      setSummary("");
 
       // #region agent log
       fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {

@@ -12,7 +12,7 @@ function mdEscape(s: string) {
 }
 
 export function SessionRecordPanelV2() {
-  const { finalRecord } = useSociety();
+  const { summary, finalRecord } = useSociety();
   const [showRaw, setShowRaw] = useState(false);
 
   const parsed = useMemo(() => {
@@ -75,6 +75,42 @@ export function SessionRecordPanelV2() {
 
   return (
     <div className="card">
+      <div className="kv" style={{ justifyContent: "space-between" }}>
+        <strong>Summary so far</strong>
+        <div className="kv">
+          <button
+            onClick={() => {
+              if (!summary) return;
+              navigator.clipboard.writeText(summary).catch(() => {});
+            }}
+            disabled={!summary}
+          >
+            Copy
+          </button>
+          <button
+            onClick={() => {
+              if (!summary) return;
+              const blob = new Blob([summary], { type: "text/markdown;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = "society-summary-so-far.md";
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            disabled={!summary}
+          >
+            Download
+          </button>
+        </div>
+      </div>
+      <small className="muted" style={{ display: "block", marginTop: 4 }}>
+        Generate this anytime to catch up mid-game.
+      </small>
+      <hr />
+      {summary ? <pre>{summary}</pre> : <small className="muted">No summary yet. Press “Generate summary”.</small>}
+      <hr />
+
       <div className="kv" style={{ justifyContent: "space-between" }}>
         <strong>Session record</strong>
         <div className="kv">

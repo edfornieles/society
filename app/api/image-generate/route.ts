@@ -4,18 +4,19 @@ import OpenAI from "openai";
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
-  if (!process.env.OPENAI_API_KEY) {
-    return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
-  }
-  const { prompt, size } = (await req.json().catch(() => ({}))) as { prompt?: string; size?: string };
-
-  if (!prompt || typeof prompt !== "string") {
-    return NextResponse.json({ error: "Missing prompt" }, { status: 400 });
-  }
-
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
   try {
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
+    }
+
+    const { prompt, size } = (await req.json().catch(() => ({}))) as { prompt?: string; size?: string };
+
+    if (!prompt || typeof prompt !== "string") {
+      return NextResponse.json({ error: "Missing prompt" }, { status: 400 });
+    }
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
     const img = await client.images.generate({
       model: "gpt-image-1",
       prompt,
@@ -30,11 +31,18 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ b64, mime: "image/png" });
   } catch (e: any) {
-    // Don't crash the dev server / error overlay; surface a structured error to the client.
-    const status = Number(e?.status ?? e?.statusCode ?? 500);
+    // Keep this handler resilient: always return structured JSON, never throw.
+    const statusRaw = Number(e?.status ?? e?.statusCode ?? 500);
+    const status = statusRaw >= 400 && statusRaw < 600 ? statusRaw : 500;
     const requestId = String(e?.requestID ?? e?.requestId ?? "");
     const code = String(e?.code ?? e?.error?.code ?? "");
     const message = String(e?.message ?? "Image generation failed");
-    return NextResponse.json({ error: message, code, requestId }, { status: status >= 400 && status < 600 ? status : 500 });
+
+    // Normalized error for moderation blocks so the client can show a clean message.
+    const moderation = code === "moderation_blocked" || String(e?.error?.code ?? "") === "moderation_blocked";
+    return NextResponse.json(
+      { error: message, code: moderation ? "moderation_blocked" : code, requestId },
+      { status: moderation ? 400 : status }
+    );
   }
 }

@@ -12,6 +12,8 @@ type SocietyState = {
   setBible: React.Dispatch<React.SetStateAction<SocietyBible>>;
   images: GeneratedImage[];
   setImages: React.Dispatch<React.SetStateAction<GeneratedImage[]>>;
+  summary: string;
+  setSummary: React.Dispatch<React.SetStateAction<string>>;
   finalRecord: string;
   setFinalRecord: React.Dispatch<React.SetStateAction<string>>;
   history: Pick<SavedGame, "id" | "createdAt" | "title">[];
@@ -23,6 +25,7 @@ const Ctx = createContext<SocietyState | null>(null);
 export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const [bible, setBible] = useState<SocietyBible>(() => createEmptyBible());
   const [images, setImages] = useState<GeneratedImage[]>([]);
+  const [summary, setSummary] = useState<string>("");
   const [finalRecord, setFinalRecord] = useState<string>("");
   const [history, setHistory] = useState<Pick<SavedGame, "id" | "createdAt" | "title">[]>([]);
 
@@ -32,8 +35,8 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ bible, setBible, images, setImages, finalRecord, setFinalRecord, history, setHistory }),
-    [bible, images, finalRecord, history]
+    () => ({ bible, setBible, images, setImages, summary, setSummary, finalRecord, setFinalRecord, history, setHistory }),
+    [bible, images, summary, finalRecord, history]
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

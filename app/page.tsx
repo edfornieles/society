@@ -15,19 +15,19 @@ export default function Page() {
           A spoken, yes-and worldbuilding game. Take turns inventing a fictional society. The AI should feel like a good friend.
         </small>
 
-        <div className="row" style={{ marginTop: 16 }}>
-          <div className="col" style={{ flex: 0.55 }}>
+        <div className="layout mt16">
+          <div className="layoutLeft">
             <SessionPickerV2 />
           </div>
-          <div className="col" style={{ flex: 1.2 }}>
+          <div className="layoutCenter">
             <VoiceConsoleV2 />
           </div>
-          <div className="col" style={{ flex: 0.8, display: "grid", gap: 16 }}>
+          <div className="layoutRight">
             <SocietyBiblePanelV2 />
             <RulesPanel />
             <SessionRecordPanelV2 />
           </div>
-          <div className="col" style={{ flex: 0.7 }}>
+          <div className="layoutImages">
             <ImageStripV2 />
           </div>
         </div>

@@ -141,7 +141,7 @@ Return STRICT JSON only (no markdown) with:
 
 Rules:
 - Use only what is supported by canon; if something is missing, leave it vague rather than inventing a totally new system.
-- If the society is dark,  violence can begraphic if appropriate.
+- If the society is dark, violence may be mentioned, but keep it non-graphic and focused on institutions/rituals/consequences (no gore).
 
 Bible summary:
 ${bibleSummaryForModel(bible)}
@@ -151,9 +151,9 @@ ${bibleSummaryForModel(bible)}
 export function imagePromptFromBible(bible: SocietyBible): string {
   const recentCanon = bible.changelog.slice(-10).map((c) => c.entry).join("; ");
   return `
-Illustrate a cinematic, documentary-style still frame from this fictional society.
-Keep it grounded, believable, and richly detailed.
-Avoid text in the image.
+Illustrate a single 1:1 image in a consistent retro “32-bit” pixel-art aesthetic (SNES/PS1-era look).
+Keep crisp pixels, limited palette, subtle dithering, and no modern photorealism.
+Avoid readable text in the image.
 
 Canon (recent): ${recentCanon || "none"}
 
@@ -171,17 +171,17 @@ Return STRICT JSON only (no markdown) with:
   "title": "short scene title",
   "caption": "ONE sentence describing what aspect of the society this image illustrates",
   "seedFacts": ["3-7 short canon facts you are using as anchors (quote/paraphrase from canon)"],
-  "styleGuide": "a stable, reusable style guide for this society's images (materials, palette, lighting, lens, mood). If provided below, keep it consistent and return it unchanged.",
-  "prompt": "a single, rich image prompt for a square image (documentary still) that embodies the society's aesthetics and daily life",
-  "negativePrompt": "things to avoid (e.g., text, logos, gore, explicit violence)"
+  "styleGuide": "a stable, reusable style guide for this society's images. MUST be '32-bit pixel art' (retro console era), plus palette, lighting, and mood. If provided below, keep it consistent and return it unchanged.",
+  "prompt": "a single, rich image prompt for a square image in 32-bit pixel art that embodies the society's aesthetics and daily life",
+  "negativePrompt": "things to avoid (e.g., text, logos, photorealism, smooth gradients, vector art, gore, explicit violence)"
 }
 
 Guidelines:
 - Use canon; if aesthetics are unclear, choose a safe, grounded interpretation consistent with recent canon.
 - Your prompt MUST clearly reflect the seedFacts. If a seedFact is about architecture/clothing/rituals, show it.
 - Prefer specific materials, lighting, clothing, architecture, and atmosphere.
-- Dark societies are allowed, violence can be graphic if appropriate.
-- No sexual content or nudity. If the society includes sexuality, depict it in a subtle way.
+- Style is ALWAYS 32-bit pixel art: crisp pixels, limited palette, subtle dithering, strong silhouettes, readable shapes.
+- Dark societies are allowed, but keep violence non-graphic (no gore). No explicit sexual content or nudity.
 - The image should be square (1:1) and contain no readable text.
 
 Bible summary:

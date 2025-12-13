@@ -10,12 +10,38 @@ body {
 }
 main {
   padding: 20px;
-  max-width: 1200px;
+  max-width: 1500px;
   margin: 0 auto;
 }
 h1 { margin: 0 0 12px 0; font-size: 20px; }
 .row { display: flex; gap: 16px; align-items: flex-start; }
 .col { flex: 1; min-width: 0; }
+.layout {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  grid-template-columns: 320px minmax(420px, 1fr) 420px 340px;
+}
+.mt16 { margin-top: 16px; }
+.layoutLeft { min-width: 0; }
+.layoutCenter { min-width: 0; }
+.layoutRight { min-width: 0; display: grid; gap: 16px; }
+.layoutImages { min-width: 0; }
+
+@media (max-width: 1280px) {
+  .layout {
+    grid-template-columns: 340px 1fr;
+  }
+  .layoutImages {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 860px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
 .card {
   border: 1px solid #e5e7eb;
   border-radius: 12px;

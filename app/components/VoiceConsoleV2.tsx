@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bumpTurn, addCanonLines, addOpenThreads } from "@/lib/societyBible";
 import { useSociety } from "./SocietyContext";
-import { saveGame, listGames } from "@/lib/gameHistory";
+import { saveGame, listGames, deleteGame, getGame } from "@/lib/gameHistory";
 import {
   systemInstructions,
   bibleSummaryForModel,
@@ -12,6 +12,7 @@ import {
   finalBreakdownPrompt,
   imageSceneProposalPrompt,
   imagePromptFromBible,
+  recapNarrationPrompt,
   Playfulness,
 } from "@/lib/prompts";
 import { safeJsonParse, sanitizeUpdate } from "@/lib/guardrails";
@@ -29,33 +30,148 @@ type BibleUpdate = {
 
 const VOICES = ["marin", "alloy", "verse", "aria", "ember"] as const;
 
-const DEFAULT_32BIT_STYLE_GUIDE =
-  "32-bit retro pixel art (SNES/PS1-era). Crisp pixels (no anti-aliasing), limited palette, subtle dithering, strong silhouettes, readable shapes. Cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
+const DEFAULT_64BIT_STYLE_GUIDE =
+  "64-bit retro pixel art (late PS1/N64-era). Crisp pixels with richer detail, broader palette, subtle dithering, strong silhouettes, readable shapes. Cozy cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
 
-export function VoiceConsoleV2() {
+const IMAGE_SIZE = "1536x1024";
+
+function normalizeText(text: string) {
+  return text.toLowerCase().replace(/[^a-z0-9\s]+/g, "").replace(/\s+/g, " ").trim();
+}
+
+function isLikelyEcho(userText: string, assistantText: string) {
+  const u = normalizeText(userText);
+  const a = normalizeText(assistantText);
+  if (!u || !a) return false;
+  if (u.length < 12) return false;
+  return a.includes(u) || u.includes(a);
+}
+
+function formatSessionTitle(coreChoice: string) {
+  const cleaned = coreChoice.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  const truncated = cleaned.length > 48 ? `${cleaned.slice(0, 45)}…` : cleaned;
+  const lowered = truncated.toLowerCase();
+  const genericStarters = ["the society", "every", "dogs are", "agriculture is", "armor making is", "fashion shapes"];
+  let core = truncated;
+  for (const starter of genericStarters) {
+    if (lowered.startsWith(starter)) {
+      core = truncated
+        .slice(starter.length)
+        .replace(/^(\s+is|\s+are|\s+being|\s+places|\s+values|\s+worships)\b/i, "")
+        .replace(/^[^a-z0-9]+/i, "")
+        .trim();
+      break;
+    }
+  }
+  const words = core.split(" ").filter(Boolean).slice(0, 3);
+  return words.join(" ");
+}
+
+function pickSessionTitle(bible: typeof bibleRef.current, parsedCore?: string, parsedTitle?: string) {
+  const core0 = String(parsedCore ?? bible?.canon?.coreValues?.[0] ?? "").trim();
+  const formatted = formatSessionTitle(core0 || "");
+  if (formatted) return formatted;
+  if (parsedTitle) return formatSessionTitle(String(parsedTitle).trim());
+
+  const genericPattern = /started a session|session started|participants have started/i;
+  const firstCanon = bible.changelog
+    .slice()
+    .sort((a, b) => a.turn - b.turn)
+    .map((c) => String(c.entry ?? "").trim())
+    .find((entry) => entry && !genericPattern.test(entry));
+
+  return formatSessionTitle(firstCanon || "") || `Society ${new Date().toLocaleString()}`;
+}
+
+function getCoreChoice(bible: typeof bibleRef.current) {
+  const explicit = String(bible?.canon?.coreValues?.[0] ?? "").trim();
+  const lastUser = String(bible?.lastUserUtterance ?? "").trim();
+  const genericPattern = /started a session|session started|participants have started|society places|central value|shapes all aspects of life/i;
+  if (lastUser && !genericPattern.test(lastUser)) return lastUser;
+  if (explicit) return explicit;
+  const firstCanon = bible.changelog
+    .slice()
+    .sort((a, b) => a.turn - b.turn)
+    .map((c) => String(c.entry ?? "").trim())
+    .find((entry) => entry && !genericPattern.test(entry));
+  return firstCanon || "";
+}
+
+export function VoiceConsoleV2({
+  showRules,
+  showSettings,
+  onToggleSettings,
+  startLabel,
+  resumeMode,
+  voice,
+  setVoice,
+  playfulness,
+  setPlayfulness,
+  autoImages,
+  setAutoImages,
+  autoEveryTurns,
+  setAutoEveryTurns,
+}: {
+  showRules: boolean;
+  showSettings: boolean;
+  onToggleSettings: () => void;
+  startLabel: string;
+  resumeMode: "new" | "continue" | "recap";
+  voice: (typeof VOICES)[number];
+  setVoice: (v: (typeof VOICES)[number]) => void;
+  playfulness: Playfulness;
+  setPlayfulness: (v: Playfulness) => void;
+  autoImages: boolean;
+  setAutoImages: (v: boolean) => void;
+  autoEveryTurns: number;
+  setAutoEveryTurns: (v: number) => void;
+}) {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [paused, setPaused] = useState(false);
 
-  const [voice, setVoice] = useState<(typeof VOICES)[number]>("marin");
-  const [playfulness, setPlayfulness] = useState<Playfulness>(2);
-
-  const { bible, setBible, images, setImages, setSummary, setFinalRecord, setHistory } = useSociety();
+  const {
+    bible,
+    setBible,
+    images,
+    setImages,
+    summary,
+    setSummary,
+    finalRecord,
+    setFinalRecord,
+    setHistory,
+    sessionId,
+    setSessionId,
+  } = useSociety();
   const [log, setLog] = useState<LogLine[]>([]);
   const [liveTranscript, setLiveTranscript] = useState<string>("");
   const [imageBusy, setImageBusy] = useState(false);
-  const [autoImages, setAutoImages] = useState(true);
-  const [autoEveryTurns, setAutoEveryTurns] = useState(1);
-  const [imageStyleGuide, setImageStyleGuide] = useState<string>(DEFAULT_32BIT_STYLE_GUIDE);
+  const [imageStyleGuide, setImageStyleGuide] = useState<string>(DEFAULT_64BIT_STYLE_GUIDE);
+  const [players, setPlayers] = useState<number>(2);
+  const [lastSaveAt, setLastSaveAt] = useState<string>("");
+  const [lastSaveTitle, setLastSaveTitle] = useState<string>("");
+  const [editTitle, setEditTitle] = useState<string>("");
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
 
   const lastAssistantTranscriptRef = useRef<string>("");
   const lastAutoImageTurnRef = useRef<number>(0);
+  const startModeRef = useRef<"new" | "continue" | "recap">("new");
   const bibleRef = useRef(bible);
   const imagesRef = useRef(images);
+  const summaryRef = useRef(summary);
+  const sessionIdRef = useRef(sessionId);
+  const lastSessionIdRef = useRef(sessionId);
+  const autosaveTimerRef = useRef<number | null>(null);
+  const pendingFinalBreakdownRef = useRef(false);
+  const lastUserTranscriptRef = useRef<string>("");
+  const lastAssistantAtRef = useRef<number>(0);
+  const resumeAfterConnectRef = useRef(false);
 
   useEffect(() => {
     bibleRef.current = bible;
@@ -64,6 +180,38 @@ export function VoiceConsoleV2() {
   useEffect(() => {
     imagesRef.current = images;
   }, [images]);
+
+  useEffect(() => {
+    summaryRef.current = summary;
+  }, [summary]);
+
+  useEffect(() => {
+    startModeRef.current = resumeMode;
+  }, [resumeMode]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    // Reset any in-flight UI indicators when switching sessions.
+    setImageBusy(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!lastSessionIdRef.current) {
+      lastSessionIdRef.current = sessionId;
+      return;
+    }
+    if (lastSessionIdRef.current !== sessionId) {
+      lastSessionIdRef.current = sessionId;
+      if (connected || connecting) {
+        stop();
+      }
+      setLiveTranscript("");
+      setLog([]);
+    }
+  }, [sessionId, connected, connecting]);
 
   const addLog = (dir: LogLine["dir"], text: string) => {
     setLog((prev) => [...prev.slice(-250), { at: new Date().toLocaleTimeString(), dir, text }]);
@@ -116,25 +264,48 @@ export function VoiceConsoleV2() {
     addLog("out", JSON.stringify(evt));
   };
 
+  const sendSessionInstructions = () => {
+    const sessionInstructions = `${systemInstructions(playfulness)}\n\n${bibleSummaryForModel(bibleRef.current)}`;
+    sendEvent(
+      mkSessionUpdate({
+        type: "realtime",
+        model: "gpt-realtime",
+        output_modalities: ["audio"],
+        instructions: sessionInstructions,
+        tools,
+        tool_choice: "auto",
+      })
+    );
+  };
+
   async function start() {
+    if (connecting || connected) {
+      stop();
+    }
     setConnecting(true);
     setLiveTranscript("");
+    setPaused(false);
+    window.dispatchEvent(new Event("society-started"));
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H3",
-          location: "VoiceConsoleV2:start",
-          message: "Requesting getUserMedia",
-          data: { constraints: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
+      if (startModeRef.current === "continue" && !sessionIdRef.current) {
+        setConnecting(false);
+        window.setTimeout(() => start(), 120);
+        return;
+      }
+      // If resuming a loaded session, wait until sessionId is set.
+      if (startModeRef.current === "continue" && !sessionIdRef.current) {
+        setConnecting(false);
+        window.setTimeout(() => start(), 120);
+        return;
+      }
+      if (!sessionIdRef.current) {
+        const id =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? (crypto.randomUUID() as string)
+            : `game_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        setSessionId(id);
+        sessionIdRef.current = id;
+      }
 
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
@@ -155,22 +326,7 @@ export function VoiceConsoleV2() {
           autoGainControl: true,
         },
       });
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H3",
-          location: "VoiceConsoleV2:start",
-          message: "getUserMedia success",
-          data: { tracks: ms.getAudioTracks().length },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      pc.addTrack(ms.getAudioTracks()[0], ms);
+      localStreamRef.current = ms;      pc.addTrack(ms.getAudioTracks()[0], ms);
 
       // Data channel for events
       const dc = pc.createDataChannel("oai-events");
@@ -181,51 +337,49 @@ export function VoiceConsoleV2() {
         setConnected(true);
         setConnecting(false);
 
-        const sessionInstructions = `${systemInstructions(playfulness)}\n\n${bibleSummaryForModel(bible)}`;
-
-        // #region agent log
-        fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: "debug-session",
-            runId: "pre-rules",
-            hypothesisId: "H1",
-            location: "VoiceConsoleV2:start",
-            message: "Session instructions prepared",
-            data: {
-              length: sessionInstructions.length,
-              hasRulesDigest: sessionInstructions.includes("Rules quick reference"),
-              playfulness,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
-
         // Session guardrails + tool config.
         // Note: voice must match the server session voice before the first audio response.
-        sendEvent(
-          mkSessionUpdate({
-            type: "realtime",
-            model: "gpt-realtime",
-            output_modalities: ["audio"],
-            instructions: sessionInstructions,
-            tools,
-            tool_choice: "auto",
-            // Keep default VAD (semantic_vad); you can disable auto responses later if you want more control.
-          })
-        );
+        sendSessionInstructions();
 
-        // Send a proactive greeting so the AI immediately invites the user to play.
-        sendEvent(
-          mkResponseCreate({
-            output_modalities: ["audio"],
-            instructions:
-              "Greet warmly, then invite the first move. Say: 'You ready to play Society? Why don’t you start: what’s the most important thing in this society?' Optionally offer 2–3 example answers (e.g., empathy, honor, efficiency). Keep it short and speakable.",
-            metadata: { topic: "greeting" },
-          })
-        );
+        const effectiveMode =
+          startModeRef.current === "new" && bibleRef.current.turnCount > 0 ? "continue" : startModeRef.current;
+
+        if (effectiveMode === "recap") {
+          const captions = imagesRef.current.map((i) => i.caption || i.title || "").filter(Boolean);
+          if (imagesRef.current.length > 0) {
+            window.dispatchEvent(
+              new CustomEvent("society-recap-slideshow", { detail: { intervalMs: 4200 } })
+            );
+          }
+          sendEvent(
+            mkResponseCreate({
+              output_modalities: ["audio"],
+              instructions: recapNarrationPrompt(bibleRef.current, captions),
+              metadata: { topic: "recap_spoken" },
+            })
+          );
+          startModeRef.current = "continue";
+        } else if (effectiveMode === "continue") {
+          sendEvent(
+            mkResponseCreate({
+              output_modalities: ["audio"],
+              instructions:
+                "Warmly welcome the player back and continue seamlessly from the existing canon summary above. In one short sentence, remind them of the core value of this society. Then prompt the next addition with one short, open question and 2–3 options. Do not invent new facts. Keep it concise.",
+              metadata: { topic: "resume" },
+            })
+          );
+          startModeRef.current = "new";
+        } else {
+          // Send a proactive greeting so the AI immediately invites the user to play.
+          sendEvent(
+            mkResponseCreate({
+              output_modalities: ["audio"],
+              instructions:
+                "Greet warmly in a relaxed tone, then invite the first move. Explain they should start by saying what the most important thing in this society is, and that everything else follows from that starting point. Mention it can be anything. Optionally offer 2–3 example answers (e.g., empathy, honor, efficiency). Keep it short and speakable.",
+              metadata: { topic: "greeting" },
+            })
+          );
+        }
       };
 
       dc.onmessage = (e) => handleServerEvent(e.data);
@@ -257,23 +411,7 @@ export function VoiceConsoleV2() {
 
       addLog("sys", "WebRTC connected; waiting for session.created...");
       setConnecting(false);
-    } catch (err: any) {
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H3",
-          location: "VoiceConsoleV2:start",
-          message: "Start error",
-          data: { error: String(err?.message ?? err) },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      setConnecting(false);
+    } catch (err: any) {      setConnecting(false);
       addLog("sys", `Start error: ${String(err?.message ?? err)}`);
       stop();
     }
@@ -283,6 +421,7 @@ export function VoiceConsoleV2() {
     setConnected(false);
     setConnecting(false);
     setStopping(false);
+    setPaused(false);
     const dc = dcRef.current;
     if (dc) {
       try { dc.close(); } catch {}
@@ -298,8 +437,97 @@ export function VoiceConsoleV2() {
       try { audio.srcObject = null; } catch {}
       remoteAudioRef.current = null;
     }
+    const local = localStreamRef.current;
+    if (local) {
+      local.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
+    }
     addLog("sys", "Stopped.");
   }
+
+  const autosave = async () => {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    const bibleToSave = bibleRef.current;
+    const imagesToSave = imagesRef.current;
+    const coreChoice = getCoreChoice(bibleToSave);
+    if (!coreChoice) return;
+    const title = pickSessionTitle(bibleToSave);
+    try {
+      await saveGame({
+        id,
+        createdAt: Date.now(),
+        title,
+        finalRecordText: finalRecord ?? "",
+        summary: summaryRef.current,
+        bible: bibleToSave,
+        images: imagesToSave,
+      });
+      setLastSaveAt(new Date().toLocaleString());
+      setLastSaveTitle(title);
+    } catch {
+      // ignore autosave failures
+    }
+  };
+
+  const onDeleteSession = async () => {
+    if (!sessionIdRef.current) return;
+    const id = sessionIdRef.current;
+    try {
+      await deleteGame(id);
+      setHistory(await listGames());
+    } catch {
+      // ignore delete failures
+    }
+    setSessionId("");
+    setSummary("");
+    setFinalRecord("");
+    setImages([]);
+    setBible((prev) => ({ ...prev, turnCount: 0, lastAiUtterance: "", changelog: [], openThreads: [] }));
+  };
+
+  const onRenameSession = async () => {
+    const id = sessionIdRef.current;
+    const nextTitle = editTitle.trim();
+    if (!id || !nextTitle) return;
+    try {
+      const existing = await getGame(id);
+      if (existing) {
+        await saveGame({ ...existing, title: nextTitle });
+      } else {
+        await saveGame({
+          id,
+          createdAt: Date.now(),
+          title: nextTitle,
+          finalRecordText: finalRecord ?? "",
+          summary: summaryRef.current,
+          bible: bibleRef.current,
+          images: imagesRef.current,
+        });
+      }
+      setHistory(await listGames());
+      setLastSaveAt(new Date().toLocaleString());
+      setLastSaveTitle(nextTitle);
+      setEditTitle("");
+    } catch {
+      // ignore rename failures
+    }
+  };
+
+  useEffect(() => {
+    if (!sessionIdRef.current) return;
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      autosaveTimerRef.current = null;
+      autosave();
+    }, 800);
+    return () => {
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+  }, [bible, images, summary, sessionId]);
 
   // --- Server event handling --------------------------------------------------
 
@@ -310,23 +538,7 @@ export function VoiceConsoleV2() {
     // Keep the log readable
     if (evt?.type) addLog("in", `${evt.type}`);
 
-    if (evt.type === "error") {
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H4",
-          location: "VoiceConsoleV2:handleServerEvent",
-          message: "Server error event",
-          data: { eventType: evt.type, error: evt?.error },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-    }
+    if (evt.type === "error") {    }
 
     // Transcript deltas (audio transcript)
     if (evt.type === "response.output_audio_transcript.delta") {
@@ -335,9 +547,42 @@ export function VoiceConsoleV2() {
       return;
     }
 
+    // User transcript deltas
+    if (evt.type === "input_audio_transcript.delta") {
+      const delta = evt?.delta ?? "";
+      lastUserTranscriptRef.current += delta;
+      return;
+    }
+
+    if (evt.type === "input_audio_transcript.done") {
+      const transcript = String(evt?.transcript ?? lastUserTranscriptRef.current ?? "").trim();
+      lastUserTranscriptRef.current = "";
+      const genericPattern = /started a session|session started|participants have started|society places|society values|central value|core value|central core|shapes all aspects|all other aspects|emerge|game is called society|society is called/i;
+      const tooSoon = Date.now() - lastAssistantAtRef.current < 5000;
+      if (
+        transcript &&
+        !genericPattern.test(transcript) &&
+        !isLikelyEcho(transcript, lastAssistantTranscriptRef.current) &&
+        !tooSoon
+      ) {
+        setBible((b) => ({ ...b, lastUserUtterance: transcript }));
+      }
+      return;
+    }
+
     if (evt.type === "response.output_audio_transcript.done") {
       const transcript = evt?.transcript ?? liveTranscript;
       lastAssistantTranscriptRef.current = transcript;
+      lastAssistantAtRef.current = Date.now();
+      const pendingUser = String(lastUserTranscriptRef.current ?? "").trim();
+      if (pendingUser) {
+        const genericPattern = /started a session|session started|participants have started|society places|society values|central value|core value|central core|shapes all aspects|all other aspects|emerge|game is called society|society is called/i;
+        const tooSoon = Date.now() - lastAssistantAtRef.current < 5000;
+        if (!genericPattern.test(pendingUser) && !isLikelyEcho(pendingUser, transcript) && !tooSoon) {
+          setBible((b) => ({ ...b, lastUserUtterance: pendingUser }));
+        }
+        lastUserTranscriptRef.current = "";
+      }
       setBible((b) => ({ ...b, lastAiUtterance: transcript }));
       setLiveTranscript("");
 
@@ -385,10 +630,25 @@ export function VoiceConsoleV2() {
             .filter(Boolean)
             .join("\n");
           setSummary(md);
+          summaryRef.current = md;
           addLog("sys", "Generated summary so far.");
+          window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: "Summary updated" } }));
         } else {
           setSummary(text);
+          summaryRef.current = text;
           addLog("sys", `Summary (raw): ${text.slice(0, 240)}`);
+          window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: "Summary updated" } }));
+        }
+        if (pendingFinalBreakdownRef.current) {
+          pendingFinalBreakdownRef.current = false;
+          sendEvent(
+            mkResponseCreate({
+              conversation: "none",
+              metadata: { topic: "final_breakdown" },
+              output_modalities: ["text"],
+              instructions: finalBreakdownPrompt(bible),
+            })
+          );
         }
       }
 
@@ -408,88 +668,42 @@ export function VoiceConsoleV2() {
         const pretty = parsed ? JSON.stringify(parsed, null, 2) : text;
         setFinalRecord(pretty);
         addLog("sys", "Saved session record.");
-
-        // #region agent log
-        fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: "debug-session",
-            runId: "pre-rules",
-            hypothesisId: "H14",
-            location: "VoiceConsoleV2:handleServerEvent",
-            message: "Final breakdown extraction",
-            data: {
-              extractedLen: text.length,
-              outputTypes: (evt?.response?.output ?? []).map((o: any) => o?.type),
-              firstOutputContentTypes: (evt?.response?.output?.[0]?.content ?? []).map((c: any) => c?.type),
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
-
-        // #region agent log
-        fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: "debug-session",
-            runId: "pre-rules",
-            hypothesisId: "H6",
-            location: "VoiceConsoleV2:handleServerEvent",
-            message: "Final breakdown received",
-            data: { parsed: Boolean(parsed), chars: String(pretty ?? "").length },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
-
         // Persist to history (IndexedDB) so the user can revisit later.
         try {
           const bibleToSave = bibleRef.current;
           const imagesToSave = imagesRef.current;
           const id =
-            typeof crypto !== "undefined" && "randomUUID" in crypto
+            sessionIdRef.current ||
+            (typeof crypto !== "undefined" && "randomUUID" in crypto
               ? (crypto.randomUUID() as string)
-              : `game_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+              : `game_${Date.now()}_${Math.random().toString(16).slice(2)}`);
           // Name sessions after the "most important thing" (usually the top core value).
-          const core0 = String(parsed?.core_values?.[0] ?? "").trim();
-          const title =
-            core0 ||
-            String(parsed?.title ?? "").trim() ||
-            (bibleToSave.changelog?.[0]?.entry ? String(bibleToSave.changelog[0].entry).slice(0, 80) : "") ||
-            `Society ${new Date().toLocaleString()}`;
+          const coreChoice = getCoreChoice(bibleToSave);
+          if (!coreChoice) {
+            addLog("sys", "Skipped save: core value not set yet.");
+            stop();
+            return;
+          }
+          const title = pickSessionTitle(bibleToSave, String(parsed?.core_values?.[0] ?? "").trim(), String(parsed?.title ?? "").trim());
           await saveGame({
             id,
             createdAt: Date.now(),
             title,
             finalRecordText: pretty,
+            summary: summaryRef.current,
             bible: bibleToSave,
             images: imagesToSave,
           });
           setHistory(await listGames());
-
-          // #region agent log
-          fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: "debug-session",
-              runId: "pre-rules",
-              hypothesisId: "H11",
-              location: "VoiceConsoleV2:handleServerEvent",
-              message: "Saved game to history",
-              data: { id, title, images: imagesToSave.length, turn: bibleToSave.turnCount },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-          // #endregion
+          setLastSaveAt(new Date().toLocaleString());
+          setLastSaveTitle(title);
+          window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: `Saved: ${title}` } }));
         } catch {
           // ignore persistence errors (private browsing, storage quota, etc.)
         }
 
         stop();
+        window.dispatchEvent(new Event("society-reset"));
       }
 
       if (topic === "image_scene") {
@@ -515,37 +729,15 @@ export function VoiceConsoleV2() {
         const fullPrompt = `${styleGuide ? `STYLE GUIDE (keep consistent): ${styleGuide}\n\n` : ""}${
           seedFacts.length ? `CANON SEEDS (must reflect):\n- ${seedFacts.join("\n- ")}\n\n` : ""
         }${prompt}\n\nAvoid: ${negative}`;
-
-        // #region agent log
-        fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: "debug-session",
-            runId: "pre-rules",
-            hypothesisId: "H7",
-            location: "VoiceConsoleV2:handleServerEvent",
-            message: "Image scene received",
-            data: {
-              title,
-              promptChars: prompt.length,
-              negativeChars: negative.length,
-              seedFacts: seedFacts.length,
-              hasStyleGuide: Boolean(styleGuide),
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
-
         try {
+          const requestSessionId = sessionIdRef.current;
           addLog("sys", "Generating image…");
           const r = await fetch("/api/image-generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               prompt: fullPrompt,
-              size: "1024x1024",
+              size: IMAGE_SIZE,
             }),
           });
           if (!r.ok) {
@@ -554,27 +746,14 @@ export function VoiceConsoleV2() {
             return;
           }
           const data = (await r.json()) as { b64: string };
+          if (sessionIdRef.current !== requestSessionId) {
+            addLog("sys", "Discarded image for previous session.");
+            return;
+          }
           setImages((prev) => [
             ...prev,
             { b64: data.b64, title, caption, seedFacts, promptUsed: fullPrompt.slice(0, 4000), at: new Date().toLocaleString() },
-          ]);
-
-          // #region agent log
-          fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: "debug-session",
-              runId: "pre-rules",
-              hypothesisId: "H7",
-              location: "VoiceConsoleV2:handleServerEvent",
-              message: "Image generated",
-              data: { title, b64Len: data.b64?.length ?? 0 },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-          // #endregion
-        } finally {
+          ]);        } finally {
           setImageBusy(false);
         }
       }
@@ -641,6 +820,7 @@ export function VoiceConsoleV2() {
 
       if (prompt) {
         try {
+          const requestSessionId = sessionIdRef.current;
           setImageBusy(true);
           addLog("sys", "Generating image…");
           const r = await fetch("/api/image-generate", {
@@ -648,15 +828,21 @@ export function VoiceConsoleV2() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               prompt: fullPrompt,
-              size: "1024x1024",
+              size: IMAGE_SIZE,
             }),
           });
           if (r.ok) {
             const data = (await r.json()) as { b64: string };
+            if (sessionIdRef.current !== requestSessionId) {
+              addLog("sys", "Discarded image for previous session.");
+              return;
+            }
             setImages((prev) => [
               ...prev,
               { b64: data.b64, title, caption, seedFacts, promptUsed: fullPrompt.slice(0, 4000), at: new Date().toLocaleString() },
             ]);
+          window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: `Image: ${title}` } }));
+            window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: `Image: ${title}` } }));
           } else {
             addLog("sys", `Image error: ${await r.text()}`);
           }
@@ -697,29 +883,6 @@ export function VoiceConsoleV2() {
       next.lastAiUtterance = lastAssistantTranscriptRef.current || prev.lastAiUtterance;
       if (update.addCanon?.length) next = addCanonLines(next, update.addCanon, turn);
       if (update.addOpenThreads?.length) next = addOpenThreads(next, update.addOpenThreads);
-
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H5",
-          location: "VoiceConsoleV2:applyBibleUpdate",
-          message: "Bible updated",
-          data: {
-            addCanonCount: update.addCanon?.length ?? 0,
-            addThreadsCount: update.addOpenThreads?.length ?? 0,
-            turnCount: next.turnCount,
-            changelogLen: next.changelog.length,
-            openThreadsLen: next.openThreads.length,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-
       return next;
     });
   }
@@ -745,31 +908,19 @@ export function VoiceConsoleV2() {
 
     setStopping(true);
     addLog("sys", "Stopping… saving session record.");
+    pendingFinalBreakdownRef.current = true;
+    onRecap();
+  };
 
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: "debug-session",
-        runId: "pre-rules",
-        hypothesisId: "H6",
-        location: "VoiceConsoleV2:onStop",
-        message: "Requesting final breakdown",
-        data: { turn: bible.turnCount, changelogLen: bible.changelog.length, openThreadsLen: bible.openThreads.length },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-
-    sendEvent(
-      mkResponseCreate({
-        conversation: "none",
-        metadata: { topic: "final_breakdown" },
-        output_modalities: ["text"],
-        instructions: finalBreakdownPrompt(bible),
-      })
-    );
+  const onTogglePause = () => {
+    const local = localStreamRef.current;
+    if (!connected || !local) return;
+    const next = !paused;
+    local.getAudioTracks().forEach((t) => {
+      t.enabled = !next;
+    });
+    setPaused(next);
+    addLog("sys", next ? "Paused input." : "Resumed input.");
   };
 
   const onUndo = () => {
@@ -784,23 +935,6 @@ export function VoiceConsoleV2() {
   const onGenerateImage = async () => {
     if (!connected || imageBusy) return;
     setImageBusy(true);
-
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: "debug-session",
-        runId: "pre-rules",
-        hypothesisId: "H7",
-        location: "VoiceConsoleV2:onGenerateImage",
-        message: "Requesting image scene proposal",
-        data: { turn: bible.turnCount, changelogLen: bible.changelog.length },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-
     // Ask the model (text-only, out-of-band) for a canon-consistent image prompt, then generate.
     sendEvent(
       mkResponseCreate({
@@ -823,144 +957,238 @@ export function VoiceConsoleV2() {
     if (lastAutoImageTurnRef.current === bible.turnCount) return;
 
     lastAutoImageTurnRef.current = bible.turnCount;
-
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: "debug-session",
-        runId: "pre-rules",
-        hypothesisId: "H8",
-        location: "VoiceConsoleV2:useEffect(autoImages)",
-        message: "Auto image trigger",
-        data: { turnCount: bible.turnCount, every: autoEveryTurns },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-
     onGenerateImage();
   }, [autoImages, autoEveryTurns, bible.turnCount, connected, imageBusy]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("society-image-busy", { detail: { busy: imageBusy } }));
+  }, [imageBusy]);
+
+  useEffect(() => {
+    const handler = () => {
+      if (connected || connecting) return;
+      start();
+    };
+    window.addEventListener("society-start", handler);
+    return () => window.removeEventListener("society-start", handler);
+  }, [connected, connecting]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { mode?: string } | undefined;
+      if (detail?.mode === "recap") {
+        startModeRef.current = "recap";
+        if (connected) {
+          const captions = imagesRef.current.map((i) => i.caption || i.title || "").filter(Boolean);
+          sendEvent(
+            mkResponseCreate({
+              output_modalities: ["audio"],
+              instructions: recapNarrationPrompt(bibleRef.current, captions),
+              metadata: { topic: "recap_spoken" },
+            })
+          );
+          startModeRef.current = "continue";
+        } else if (!connecting) {
+          start();
+        }
+      }
+    };
+    window.addEventListener("society-recap", handler);
+    return () => window.removeEventListener("society-recap", handler);
+  }, [connected, connecting]);
+
+  useEffect(() => {
+    const handler = () => {
+      startModeRef.current = "continue";
+      if (connected) {
+        sendSessionInstructions();
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions:
+              "Warmly welcome the player back and continue seamlessly from the existing canon summary above. In one short sentence, remind them of the core value of this society. Then prompt the next addition with one short, open question and 2–3 options. Do not invent new facts. Keep it concise.",
+            metadata: { topic: "resume" },
+          })
+        );
+        startModeRef.current = "new";
+      } else if (!connecting) {
+        resumeAfterConnectRef.current = true;
+        start();
+      }
+    };
+    window.addEventListener("society-resume", handler);
+    return () => window.removeEventListener("society-resume", handler);
+  }, [connected, connecting]);
 
   useEffect(() => () => stop(), []);
 
   return (
     <div className="card">
-      <div className="kv" style={{ justifyContent: "space-between" }}>
+      <div className="kv vcHeaderRow">
         <div className="kv">
-          <strong>Realtime voice</strong>
-          <span className="tag">{connected ? "connected" : connecting ? "connecting…" : "offline"}</span>
-        </div>
-
-        <div className="kv">
-          <label className="tag">
-            Voice{" "}
-            <select
-              value={voice}
-              disabled={connected || connecting}
-              onChange={(e) => setVoice(e.target.value as any)}
-              style={{ marginLeft: 6 }}
-            >
-              {VOICES.map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="tag">
-            Play{" "}
-            <select
-              value={playfulness}
-              disabled={connected || connecting}
-              onChange={(e) => setPlayfulness(Number(e.target.value) as Playfulness)}
-              style={{ marginLeft: 6 }}
-            >
-              <option value={0}>0</option>
-              <option value={1}>1</option>
-              <option value={2}>2</option>
-              <option value={3}>3</option>
-            </select>
-          </label>
-
           {!connected ? (
             <button onClick={start} disabled={connecting}>
-              Start
+              {startLabel}
             </button>
           ) : (
-            <button onClick={onStop}>{stopping ? "Stopping…" : "Stop"}</button>
+            <>
+              <button onClick={onTogglePause}>
+                {paused ? "Play" : "Pause"}
+              </button>
+              <button onClick={onStop}>
+                Stop
+              </button>
+            </>
           )}
+          <button onClick={onUndo}>
+            Undo
+          </button>
+          <span className={`statusLight ${connected ? "statusLight--on" : "statusLight--off"}`} />
         </div>
       </div>
 
-      <hr />
-
-      <div className="kv">
-        <button onClick={onRecap} disabled={!connected}>
-          Generate summary
-        </button>
-        <button onClick={onUndo}>
-          Undo last canon line
-        </button>
-        <button onClick={onGenerateImage} disabled={!connected || imageBusy}>
-          {imageBusy ? "Generating…" : "Generate image"}
-        </button>
-        <label className="tag">
-          Auto images{" "}
-          <input
-            type="checkbox"
-            checked={autoImages}
-            onChange={(e) => setAutoImages(e.target.checked)}
-            style={{ marginLeft: 6 }}
-          />
-        </label>
-        <label className="tag">
-          Every{" "}
-          <select
-            value={autoEveryTurns}
-            onChange={(e) => setAutoEveryTurns(Number(e.target.value))}
-            style={{ marginLeft: 6 }}
-          >
-            <option value={1}>1 turn</option>
-            <option value={2}>2 turns</option>
-            <option value={3}>3 turns</option>
-            <option value={4}>4 turns</option>
-          </select>
-        </label>
-        <span className="tag">Tip: wear headphones to avoid echo.</span>
+      <div className="liveTranscript">
+        {liveTranscript ? <pre>{liveTranscript}</pre> : <small className="muted">The AI voice appears here as it speaks.</small>}
       </div>
 
-      <hr />
-
-      <div style={{ display: "grid", gap: 10 }}>
-        <section>
-          <strong>Live transcript (assistant)</strong>
-          <div className="card" style={{ borderRadius: 10 }}>
-            {liveTranscript ? <pre>{liveTranscript}</pre> : <small className="muted">Waiting…</small>}
-          </div>
-        </section>
-
-        <section>
-          <strong>Event log</strong>
-          <div className="card" style={{ borderRadius: 10, maxHeight: 240, overflow: "auto" }}>
-            {log.length === 0 ? (
-              <small className="muted">No events yet.</small>
-            ) : (
-              <div style={{ display: "grid", gap: 6 }}>
-                {log.slice().reverse().slice(0, 120).map((l, i) => (
-                  <div key={i}>
-                    <span className="tag">{l.at}</span>{" "}
-                    <span className="tag">{l.dir}</span>{" "}
-                    <span style={{ fontSize: 12 }}>{l.text}</span>
-                  </div>
-                ))}
+      {showSettings ? (
+        <div className="modalOverlay">
+          <div className="modalCard">
+            <div className="modalHeader">
+              <strong>Settings</strong>
+              <div className="kv">
+                {sessionId ? (
+                  <button onClick={onDeleteSession} className="dangerButton">
+                    Delete session
+                  </button>
+                ) : null}
+                <button className="modalClose" onClick={onToggleSettings}>
+                  X
+                </button>
               </div>
-            )}
+            </div>
+            <div className="modalBody vcSettingsGrid">
+              <label className="tag">
+                Voice{" "}
+                <select
+                  value={voice}
+                  disabled={connected || connecting}
+                  onChange={(e) => setVoice(e.target.value as any)}
+                  className="vcFieldSpacing"
+                >
+                  {VOICES.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="tag">
+                Play{" "}
+                <select
+                  value={playfulness}
+                  disabled={connected || connecting}
+                  onChange={(e) => setPlayfulness(Number(e.target.value) as Playfulness)}
+                  className="vcFieldSpacing"
+                >
+                  <option value={0}>0</option>
+                  <option value={1}>1</option>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                </select>
+              </label>
+              <label className="tag">
+                Players{" "}
+                <input
+                  type="number"
+                  min={1}
+                  max={6}
+                  value={players}
+                  onChange={(e) => setPlayers(Number(e.target.value))}
+                  className="vcNumberInput"
+                />
+              </label>
+              <label className="tag">
+                Auto images{" "}
+                <input
+                  type="checkbox"
+                  checked={autoImages}
+                  onChange={(e) => setAutoImages(e.target.checked)}
+                  className="vcFieldSpacing"
+                />
+              </label>
+              <label className="tag">
+                Every{" "}
+                <select
+                  value={autoEveryTurns}
+                  onChange={(e) => setAutoEveryTurns(Number(e.target.value))}
+                  className="vcFieldSpacing"
+                >
+                  <option value={1}>1 turn</option>
+                  <option value={2}>2 turns</option>
+                  <option value={3}>3 turns</option>
+                  <option value={4}>4 turns</option>
+                </select>
+              </label>
+              <span className="tag">Wear headphones to avoid echo.</span>
+
+              <details>
+                <summary className="muted">Event log</summary>
+                <div className="card vcLogCard">
+                  {log.length === 0 ? (
+                    <small className="muted">No events yet.</small>
+                  ) : (
+                    <div className="vcLogList">
+                      {log.slice().reverse().slice(0, 120).map((l, i) => (
+                        <div key={i}>
+                          <span className="tag">{l.at}</span>{" "}
+                          <span className="tag">{l.dir}</span>{" "}
+                          <span className="vcLogText">{l.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </details>
+
+              <details>
+                <summary className="muted">Summary so far</summary>
+                <div className="card vcSummaryCard">
+                  <div className="kv vcSummaryActions">
+                    <button onClick={onRecap} disabled={!connected && !sessionId}>
+                      Update summary
+                    </button>
+                    {sessionId ? (
+                      <button onClick={onDeleteSession}>
+                        Delete session
+                      </button>
+                    ) : null}
+                  </div>
+                  {sessionId ? (
+                    <div className="kv vcSummaryActions">
+                      <input
+                        className="sessionTitleInput"
+                        placeholder="Rename session..."
+                        value={editTitle}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                      />
+                      <button onClick={onRenameSession} disabled={!editTitle.trim()}>
+                        Save title
+                      </button>
+                    </div>
+                  ) : null}
+                  {lastSaveAt ? (
+                    <small className="muted">
+                      Last saved: {lastSaveAt}{lastSaveTitle ? ` — ${lastSaveTitle}` : ""}
+                    </small>
+                  ) : null}
+                  {summary ? <pre>{summary}</pre> : <small className="muted">No summary yet. Press “Update summary”.</small>}
+                </div>
+              </details>
+            </div>
           </div>
-        </section>
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

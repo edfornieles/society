@@ -90,22 +90,6 @@ export function VoiceConsole() {
     setConnecting(true);
     setLiveTranscript("");
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H3",
-          location: "VoiceConsole:start",
-          message: "Requesting getUserMedia",
-          data: { constraints: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
 
@@ -124,23 +108,7 @@ export function VoiceConsole() {
           noiseSuppression: true,
           autoGainControl: true,
         },
-      });
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H3",
-          location: "VoiceConsole:start",
-          message: "getUserMedia success",
-          data: { tracks: ms.getAudioTracks().length },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      pc.addTrack(ms.getAudioTracks()[0], ms);
+      });      pc.addTrack(ms.getAudioTracks()[0], ms);
 
       // Data channel for events
       const dc = pc.createDataChannel("oai-events");
@@ -152,27 +120,6 @@ export function VoiceConsole() {
         setConnecting(false);
 
         const sessionInstructions = `${systemInstructions(playfulness)}\n\n${bibleSummaryForModel(bible)}`;
-
-        // #region agent log
-        fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: "debug-session",
-            runId: "pre-rules",
-            hypothesisId: "H1",
-            location: "VoiceConsole:start",
-            message: "Session instructions prepared",
-            data: {
-              length: sessionInstructions.length,
-              hasRulesDigest: sessionInstructions.includes("Rules quick reference"),
-              playfulness,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
-
         // Session guardrails + tool config.
         // Note: voice must match the server session voice before the first audio response.
         sendEvent(
@@ -227,23 +174,7 @@ export function VoiceConsole() {
 
       addLog("sys", "WebRTC connected; waiting for session.created...");
       setConnecting(false);
-    } catch (err: any) {
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H3",
-          location: "VoiceConsole:start",
-          message: "Start error",
-          data: { error: String(err?.message ?? err) },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      setConnecting(false);
+    } catch (err: any) {      setConnecting(false);
       addLog("sys", `Start error: ${String(err?.message ?? err)}`);
       stop();
     }
@@ -279,23 +210,7 @@ export function VoiceConsole() {
     // Keep the log readable
     if (evt?.type) addLog("in", `${evt.type}`);
 
-    if (evt.type === "error") {
-      // #region agent log
-      fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: "debug-session",
-          runId: "pre-rules",
-          hypothesisId: "H4",
-          location: "VoiceConsole:handleServerEvent",
-          message: "Server error event",
-          data: { eventType: evt.type, error: evt?.error },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-    }
+    if (evt.type === "error") {    }
 
     // Transcript deltas (audio transcript)
     if (evt.type === "response.output_audio_transcript.delta") {

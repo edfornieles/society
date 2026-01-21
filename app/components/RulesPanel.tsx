@@ -4,23 +4,7 @@ import { useEffect } from "react";
 import { aiRulesSections, playerRulesSections } from "@/lib/rules";
 
 export function RulesPanel() {
-  useEffect(() => {
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: "debug-session",
-        runId: "pre-rules",
-        hypothesisId: "H2",
-        location: "RulesPanel:useEffect",
-        message: "Rules panel rendered",
-        data: { playerSections: playerRulesSections.length, aiSections: aiRulesSections.length },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-  }, []);
+  useEffect(() => {  }, []);
 
   return (
     <div className="card">

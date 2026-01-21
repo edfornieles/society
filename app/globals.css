@@ -1,67 +1,177 @@
+@import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Pixelify+Sans:wght@400;700&display=swap");
+
 :root {
   color-scheme: light;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  font-family: "Press Start 2P", "Pixelify Sans", "VT323", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --bg: #f1c59a;
+  --bg-deep: #e9b07f;
+  --ink: #2b1a14;
+  --panel: #f7e2c9;
+  --panel-strong: #fcead5;
+  --border: #55321d;
+  --shadow: #2a170f;
+  --accent: #f15f3b;
+  --accent-deep: #c63a1b;
 }
 body {
   margin: 0;
   padding: 0;
-  background: #f7f8fa;
-  color: #0f172a;
+  background: radial-gradient(circle at top left, var(--panel-strong), var(--bg));
+  color: var(--ink);
 }
 main {
-  padding: 20px;
-  max-width: 1500px;
-  margin: 0 auto;
+  padding: 0;
+  max-width: none;
+  margin: 0;
 }
-h1 { margin: 0 0 12px 0; font-size: 20px; }
-.row { display: flex; gap: 16px; align-items: flex-start; }
-.col { flex: 1; min-width: 0; }
-.layout {
+.gameRoot {
+  display: grid;
+  gap: 0;
+}
+.logoPixel {
+  display: grid;
+  gap: 8px;
+}
+.logoImage {
+  width: 216px;
+  height: auto;
+  image-rendering: pixelated;
+}
+.logoTag {
+  font-size: 48px;
+  letter-spacing: 2px;
+  padding: 10px 14px;
+  color: #fff4e1;
+  background: var(--accent);
+  border: 3px solid var(--border);
+  box-shadow: 4px 4px 0 var(--shadow);
+  text-transform: uppercase;
+}
+.logoSub {
+  font-size: 12px;
+  color: var(--border);
+}
+.gameLayout {
+  position: relative;
+}
+.topNav {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  right: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  z-index: 4;
+  padding: 6px 8px;
+}
+.gameSidebar {
+  position: fixed;
+  top: 120px;
+  left: 16px;
+  width: 360px;
+  min-width: 0;
   display: grid;
   gap: 16px;
-  align-items: start;
-  grid-template-columns: 320px minmax(420px, 1fr) 420px 340px;
+  z-index: 3;
+  font-size: 14px;
 }
-.mt16 { margin-top: 16px; }
-.layoutLeft { min-width: 0; }
-.layoutCenter { min-width: 0; }
-.layoutRight { min-width: 0; display: grid; gap: 16px; }
-.layoutImages { min-width: 0; }
-
-@media (max-width: 1280px) {
-  .layout {
-    grid-template-columns: 340px 1fr;
-  }
-  .layoutImages {
-    grid-column: 1 / -1;
-  }
+.hudNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.imageProgressWrap {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  display: grid;
+  gap: 6px;
+  z-index: 200;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.imageProgressWrap.is-hidden { opacity: 0; }
+.imageProgressWrap.is-visible { opacity: 1; }
+.imageProgressLabel {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--border);
+}
+.imageProgressTrack {
+  width: 220px;
+  height: 10px;
+  border: 2px solid var(--border);
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.imageProgressBar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+.progress-0 { width: 0%; }
+.progress-10 { width: 10%; }
+.progress-20 { width: 20%; }
+.progress-30 { width: 30%; }
+.progress-40 { width: 40%; }
+.progress-50 { width: 50%; }
+.progress-60 { width: 60%; }
+.progress-70 { width: 70%; }
+.progress-80 { width: 80%; }
+.progress-90 { width: 90%; }
+.progress-100 { width: 100%; }
+.savedMenu {
+  position: relative;
+}
+.savedMenu .sessionCard {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 6px;
+  width: 320px;
+  z-index: 5;
+}
+.gameStage {
+  min-width: 0;
+  width: 100%;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
 }
 
-@media (max-width: 860px) {
-  .layout {
+@media (max-width: 1200px) {
+  .gameLayout {
     grid-template-columns: 1fr;
   }
 }
 .card {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 12px;
-  background: #ffffff;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--panel);
+  box-shadow: 4px 4px 0 var(--shadow);
 }
-small.muted { color: #6b7280; }
+.muted,
+small.muted { color: #6b4b3b; }
 button, select, input {
   font: inherit;
 }
 button {
-  border: 1px solid #d1d5db;
-  background: #fff;
-  border-radius: 10px;
-  padding: 8px 10px;
+  border: 2px solid var(--border);
+  background: var(--panel-strong);
+  border-radius: 6px;
+  padding: 8px 12px;
   cursor: pointer;
+  box-shadow: 3px 3px 0 var(--shadow);
 }
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.55;
   cursor: not-allowed;
+  box-shadow: none;
 }
 textarea {
   width: 100%;
@@ -70,13 +180,274 @@ textarea {
   font: inherit;
 }
 .kv { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vcHeaderRow { justify-content: flex-start; }
+.vcSettingsGrid { display: grid; gap: 12px; }
+.vcFieldSpacing { margin-left: 6px; }
+.vcNumberInput { margin-left: 6px; width: 80px; }
+.vcLogCard { border-radius: 10px; max-height: 240px; overflow: auto; margin-top: 8px; }
+.vcLogList { display: grid; gap: 6px; }
+.vcLogText { font-size: 12px; }
+.vcSummaryCard { border-radius: 10px; margin-top: 8px; }
+.vcSummaryActions { margin-bottom: 6px; }
 .tag {
   display: inline-block;
-  padding: 2px 8px;
-  border: 1px solid #e5e7eb;
-  background: #f8fafc;
+  padding: 3px 8px;
+  border: 2px solid var(--border);
+  background: var(--panel-strong);
   border-radius: 999px;
   font-size: 12px;
+}
+.liveTranscript {
+  margin-top: 12px;
+  padding: 10px;
+  border: 2px dashed var(--border);
+  background: #ffe8cf;
+  min-height: 74px;
+}
+.imagePanelFull {
+  position: absolute;
+  inset: 0;
+}
+.stageImageFull {
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  image-rendering: pixelated;
+  background: #1c120c;
+}
+.centerLogo {
+  position: absolute;
+  left: 50%;
+  top: 60%;
+  transform: translate(-50%, -50%);
+  width: clamp(320px, 36vw, 680px);
+  height: auto;
+  image-rendering: pixelated;
+  z-index: 1;
+  pointer-events: none;
+}
+.stageImageFallback {
+  width: 100vw;
+  height: 100vh;
+  background: radial-gradient(circle at top left, var(--panel-strong), var(--bg));
+}
+.floatingCaption {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: fit-content;
+  max-width: 520px;
+  bottom: 14vh;
+  border: 3px solid var(--border);
+  background: rgba(244, 216, 183, 0.96);
+  padding: 12px 14px;
+  box-shadow: 6px 6px 0 var(--shadow);
+  z-index: 2;
+}
+.floatingHeaderRow {
+  justify-content: space-between;
+}
+.imageError {
+  display: block;
+  margin-top: 6px;
+}
+.floatingCaption p {
+  margin: 8px 0 0;
+  font-size: clamp(9px, 1vw, 16px);
+  line-height: 1.5;
+  font-weight: 700;
+}
+.coreChoiceText {
+  font-weight: 700;
+  text-transform: none;
+}
+.floatingTitle {
+  font-size: clamp(12px, 1.3vw, 22px);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+.integratedTitle {
+  margin-bottom: 6px;
+  font-weight: 900;
+}
+.floatingTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.imageNavArrows {
+  display: inline-flex;
+  gap: 6px;
+}
+.arrowButton {
+  padding: 2px 6px;
+  border: 2px solid var(--border);
+  background: var(--panel-strong);
+  border-radius: 6px;
+  box-shadow: 2px 2px 0 var(--shadow);
+}
+.arrowButton:disabled {
+  opacity: 0.5;
+  box-shadow: none;
+}
+
+.welcomeBody {
+  line-height: 1.7;
+}
+
+/* Chromium (Chrome/Edge) scaling adjustments */
+@supports (-webkit-text-size-adjust: 100%) and (not (-webkit-touch-callout: none)) {
+  .gameSidebar {
+    width: 420px;
+    font-size: 18px;
+  }
+
+  .hudNav button {
+    padding: 12px 16px;
+    font-size: 18px;
+  }
+
+  .logoImage {
+    width: 240px;
+  }
+
+  .centerLogo {
+    width: clamp(320px, 38vw, 760px);
+  }
+
+  .floatingCaption {
+    width: fit-content;
+    max-width: 560px;
+    padding: 12px 14px;
+    bottom: 14vh;
+  }
+
+  .floatingTitle {
+    font-size: clamp(12px, 1.4vw, 24px);
+  }
+
+  .floatingCaption p {
+    font-size: clamp(9px, 1.1vw, 18px);
+  }
+}
+
+/* Safari scaling adjustments */
+@supports (-webkit-touch-callout: none) {
+  .gameSidebar {
+    width: 420px;
+    font-size: 18px;
+  }
+
+  .hudNav button {
+    padding: 12px 16px;
+    font-size: 18px;
+  }
+
+  .logoImage {
+    width: 240px;
+  }
+
+  .centerLogo {
+    width: clamp(320px, 38vw, 760px);
+    top: 60%;
+  }
+
+  .floatingCaption {
+    width: fit-content;
+    max-width: 560px;
+    padding: 12px 14px;
+    bottom: 14vh;
+  }
+
+  .floatingTitle {
+    font-size: clamp(12px, 1.4vw, 24px);
+  }
+
+  .floatingCaption p {
+    font-size: clamp(9px, 1.1vw, 18px);
+  }
+}
+.startLink {
+  border: none;
+  background: transparent;
+  color: var(--accent-deep);
+  font-weight: 700;
+  text-decoration: underline;
+  padding: 0;
+  box-shadow: none;
+  cursor: pointer;
+}
+.startLink:hover {
+  color: var(--accent);
+}
+.statusLight {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid var(--border);
+  box-shadow: 2px 2px 0 var(--shadow);
+  background: #c23b2a;
+}
+.statusLight--on {
+  background: #3dcc5f;
+}
+.statusLight--off {
+  background: #c23b2a;
+}
+.sessionCard small {
+  font-size: 12px;
+}
+.sessionLabel {
+  font-size: 12px;
+}
+.sessionSelect {
+  font-size: 12px;
+  padding: 6px 8px;
+  width: 100%;
+}
+.imagePlaceholder {
+  padding: 24px;
+  border: 2px dashed var(--border);
+  background: #ffe6cd;
+  display: grid;
+  gap: 8px;
+  text-align: center;
+}
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(25, 15, 9, 0.6);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 20px;
+}
+.modalCard {
+  width: min(900px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+  border: 3px solid var(--border);
+  background: var(--panel);
+  box-shadow: 6px 6px 0 var(--shadow);
+  padding: 14px;
+}
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.modalBody {
+  display: grid;
+  gap: 12px;
+}
+.modalClose {
+  border: 2px solid var(--border);
+  background: var(--accent);
+  color: #fff4e1;
+  box-shadow: 3px 3px 0 var(--shadow);
 }
 pre {
   white-space: pre-wrap;
@@ -85,6 +456,22 @@ pre {
 }
 hr {
   border: none;
-  border-top: 1px solid #e5e7eb;
+  border-top: 2px solid var(--border);
   margin: 12px 0;
+}
+
+.dangerButton {
+  border: 2px solid #7b1c12;
+  background: #f3b7a9;
+  color: #5a130c;
+  box-shadow: 3px 3px 0 var(--shadow);
+}
+
+
+.sessionTitleInput {
+  padding: 6px 8px;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-strong);
+  color: var(--ink);
 }

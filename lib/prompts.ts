@@ -20,9 +20,12 @@ Hard rules:
 1) Never contradict established canon. If the user contradicts canon, reconcile via (a) region/faction, (b) time shift, or (c) propaganda vs reality, and ask the user to pick one.
 2) Keep turns short and speakable:
    Mirror (1 sentence) → Extend (1–2 sentences) → Prompt (1 question with 2–3 options).
+   Never say the words "mirror", "extend", or "prompt" out loud.
 3) Prefer concrete sensory details and consequences in daily life over abstractions.
-4) Be a good friend: curious, warm, lightly funny, and always trying to make the user’s ideas shine.
-5) If a new key term seems misheard, ask for confirmation before canonizing it.
+4) Be neutral and user-led: do not default to medieval or any specific era/style unless the user establishes it.
+   Build only on what the user says; if unclear, ask a question instead of filling in with assumptions.
+5) Be a good friend: curious, warm, lightly funny, and always trying to make the user’s ideas shine.
+6) If a new key term seems misheard, ask for confirmation before canonizing it.
 
 Rules quick reference:
 ${rulesDigestForAi()}
@@ -41,9 +44,16 @@ export function bibleSummaryForModel(bible: SocietyBible): string {
   // Keep this compact. It gets injected frequently.
   const canonLines = bible.changelog.slice(-12).map((c) => `- ${c.entry}`).join("\n");
   const threads = bible.openThreads.slice(-8).map((t) => `- ${t}`).join("\n");
+  const coreValues = bible.canon.coreValues.slice(0, 5).map((v) => `- ${v}`).join("\n");
   return `
 SOCIAL BIBLE (compact)
 Turn: ${bible.turnCount}
+
+Core values:
+${coreValues || "- (none yet)"}
+
+Last user intent:
+${bible.lastUserUtterance || "- (none yet)"}
 
 Recent canon:
 ${canonLines || "- (none yet)"}
@@ -96,6 +106,27 @@ Return STRICT JSON only (no markdown) with:
 
 Bible summary:
 ${bibleSummaryForModel(bible)}
+`.trim();
+}
+
+export function recapNarrationPrompt(bible: SocietyBible, imageCaptions: string[]): string {
+  const captions = imageCaptions
+    .filter(Boolean)
+    .slice(-8)
+    .map((c, i) => `${i + 1}. ${c}`)
+    .join("\n");
+  return `
+Give a short, engaging spoken recap of the society so far, based ONLY on the canon summary and image captions.
+Keep it concise (4-6 sentences), friendly, and in-world. Avoid questions.
+Describe each image in order, matching the image currently on screen (one short sentence per image).
+Do NOT invent new facts. If details are missing, say so briefly and stay neutral.
+End with one inviting prompt asking the player what part of the society to develop next.
+
+Canon summary:
+${bibleSummaryForModel(bible)}
+
+Image captions:
+${captions || "- (no images yet)"}
 `.trim();
 }
 
@@ -169,18 +200,21 @@ You are helping illustrate a fictional society invented in the improv game “So
 Return STRICT JSON only (no markdown) with:
 {
   "title": "short scene title",
-  "caption": "ONE sentence describing what aspect of the society this image illustrates",
+  "caption": "ONE sentence describing what aspect of the society this image illustrates (a statement, not a question)",
   "seedFacts": ["3-7 short canon facts you are using as anchors (quote/paraphrase from canon)"],
-  "styleGuide": "a stable, reusable style guide for this society's images. MUST be '32-bit pixel art' (retro console era), plus palette, lighting, and mood. If provided below, keep it consistent and return it unchanged.",
-  "prompt": "a single, rich image prompt for a square image in 32-bit pixel art that embodies the society's aesthetics and daily life",
+  "styleGuide": "a stable, reusable style guide for this society's images. MUST be '64-bit pixel art' (retro console era), plus palette, lighting, and mood. If provided below, keep it consistent and return it unchanged.",
+  "prompt": "a single, rich image prompt for a square image in 64-bit pixel art that embodies the society's aesthetics and daily life",
   "negativePrompt": "things to avoid (e.g., text, logos, photorealism, smooth gradients, vector art, gore, explicit violence)"
 }
 
 Guidelines:
 - Use canon; if aesthetics are unclear, choose a safe, grounded interpretation consistent with recent canon.
+- Do not default to medieval or any specific era unless canon explicitly indicates it.
+- If canon is thin, keep the scene neutral and ask a clarifying question in the caption.
+- The caption MUST be a brief descriptive statement of what's happening (no questions).
 - Your prompt MUST clearly reflect the seedFacts. If a seedFact is about architecture/clothing/rituals, show it.
 - Prefer specific materials, lighting, clothing, architecture, and atmosphere.
-- Style is ALWAYS 32-bit pixel art: crisp pixels, limited palette, subtle dithering, strong silhouettes, readable shapes.
+- Style is ALWAYS 64-bit pixel art: crisp pixels, richer palette, subtle dithering, strong silhouettes, readable shapes.
 - Dark societies are allowed, but keep violence non-graphic (no gore). No explicit sexual content or nudity.
 - The image should be square (1:1) and contain no readable text.
 

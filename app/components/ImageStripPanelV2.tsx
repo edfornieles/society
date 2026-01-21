@@ -1,47 +1,77 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSociety } from "./SocietyContext";
 import type { GeneratedImage } from "./ImageStrip";
 
 export function ImageStripPanelV2() {
-  const { images, setImages } = useSociety();
+  const { bible, images, setImages, sessionId } = useSociety();
   const [busyKey, setBusyKey] = useState<string>("");
   const [lastError, setLastError] = useState<string>("");
+  const [activeIndex, setActiveIndex] = useState<number>(0);
+  const [introStarted, setIntroStarted] = useState(false);
+  const [recapActive, setRecapActive] = useState(false);
 
-  const reversed = useMemo(() => images.slice().reverse(), [images]);
+  useEffect(() => {
+    if (images.length > 0) {
+      setActiveIndex(images.length - 1);
+    } else {
+      setActiveIndex(0);
+    }
+  }, [images.length]);
 
-  const onReroll = async (reverseIdx: number) => {
-    const img = reversed[reverseIdx];
+  useEffect(() => {
+    const handler = () => setIntroStarted(false);
+    window.addEventListener("society-reset", handler);
+    window.addEventListener("society-session-loaded", handler);
+    return () => {
+      window.removeEventListener("society-reset", handler);
+      window.removeEventListener("society-session-loaded", handler);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setIntroStarted(true);
+    window.addEventListener("society-started", handler);
+    return () => window.removeEventListener("society-started", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { intervalMs?: number } | undefined;
+      if (images.length === 0) return;
+      const interval = Math.max(1800, Number(detail?.intervalMs ?? 2200));
+      setRecapActive(true);
+      setActiveIndex(0);
+      let idx = 0;
+      const id = window.setInterval(() => {
+        idx += 1;
+        if (idx >= images.length) {
+          window.clearInterval(id);
+          setRecapActive(false);
+          return;
+        }
+        setActiveIndex(idx);
+      }, interval);
+    };
+    window.addEventListener("society-recap-slideshow", handler);
+    return () => window.removeEventListener("society-recap-slideshow", handler);
+  }, [images.length]);
+
+  const onReroll = async () => {
+    const img = images[activeIndex];
     if (!img?.promptUsed) {
       setLastError("No prompt saved for this image yet.");
       return;
     }
-    const key = `${img.at}-${reverseIdx}`;
+    const key = `${img.at}-${activeIndex}`;
     setBusyKey(key);
     setLastError("");
-
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/b2dae784-5015-4eea-b33c-5e75d4eaa8bc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: "debug-session",
-        runId: "pre-rules",
-        hypothesisId: "H17",
-        location: "ImageStripPanelV2:onReroll",
-        message: "Re-rolling image",
-        data: { hasPrompt: true, promptChars: img.promptUsed.length, title: img.title },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-
     try {
       const r = await fetch("/api/image-generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: img.promptUsed, size: "1024x1024" }),
+        body: JSON.stringify({ prompt: img.promptUsed, size: "1536x1024" }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || !data?.b64) {
@@ -49,13 +79,11 @@ export function ImageStripPanelV2() {
         return;
       }
 
-      // Replace the corresponding image (same order) with a new b64.
-      const forwardIdx = images.length - 1 - reverseIdx;
       setImages((prev) => {
         const next = prev.slice();
-        const cur = next[forwardIdx];
+        const cur = next[activeIndex];
         if (!cur) return prev;
-        next[forwardIdx] = { ...cur, b64: String(data.b64), at: new Date().toLocaleString() } satisfies GeneratedImage;
+        next[activeIndex] = { ...cur, b64: String(data.b64), at: new Date().toLocaleString() } satisfies GeneratedImage;
         return next;
       });
     } finally {
@@ -63,49 +91,95 @@ export function ImageStripPanelV2() {
     }
   };
 
+  const current = images[activeIndex] ?? images[images.length - 1];
+  const canPrev = activeIndex > 0;
+  const canNext = activeIndex < images.length - 1;
+  const coreChoice = String(bible.lastUserUtterance ?? bible.canon.coreValues?.[0] ?? bible.changelog?.[0]?.entry ?? "").trim();
+  const showPrompt = introStarted && !coreChoice;
+  const showCoreChoiceUntilImage = introStarted && coreChoice && images.length === 0;
+  const rawCaption = current?.caption?.trim() ?? "";
+  const captionText = rawCaption ? rawCaption.replace(/\?/g, "").trim() : "";
+  const fallbackDescription =
+    captionText ||
+    current?.title ||
+    String(bible.lastAiUtterance ?? "").trim() ||
+    "";
+
   return (
-    <div className="card" style={{ maxHeight: "78vh", overflow: "auto" }}>
-      <strong>Illustrations</strong>
-      <small className="muted" style={{ display: "block", marginTop: 4 }}>
-        Auto-generated (and re-rollable) square images that reflect canon + aesthetics.
-      </small>
-      {lastError ? (
-        <small className="muted" style={{ display: "block", marginTop: 6 }}>
-          Image error: {lastError}
-        </small>
-      ) : null}
-      <hr />
-
-      {reversed.length === 0 ? (
-        <small className="muted">No images yet.</small>
+    <div className="imagePanelFull">
+      {current ? (
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img alt={current.title} src={`data:image/png;base64,${current.b64}`} className="stageImageFull" />
+          <div className="floatingCaption">
+            <div className="floatingTitle integratedTitle floatingTitleRow">
+              <span>{current.title}</span>
+              <span className="imageNavArrows">
+                <button
+                  className="arrowButton"
+                  onClick={() => setActiveIndex((i) => Math.max(0, i - 1))}
+                  disabled={!canPrev}
+                  aria-label="Previous image"
+                >
+                  ◀
+                </button>
+                <button
+                  className="arrowButton"
+                  onClick={() => setActiveIndex((i) => Math.min(images.length - 1, i + 1))}
+                  disabled={!canNext}
+                  aria-label="Next image"
+                >
+                  ▶
+                </button>
+              </span>
+            </div>
+            {showPrompt ? (
+              <p>WHAT IS THE MOST IMPORTANT THING IN YOUR SOCIETY?</p>
+            ) : showCoreChoiceUntilImage ? (
+              <p className="coreChoiceText">{`You chose: ${coreChoice}`}</p>
+            ) : fallbackDescription ? (
+              <p>{fallbackDescription}</p>
+            ) : (
+              <p className="muted">No scene summary yet.</p>
+            )}
+            {images.length > 1 ? <small className="muted">{activeIndex + 1} / {images.length}</small> : null}
+            {lastError ? (
+              <small className="muted imageError">
+                Image error: {lastError}
+              </small>
+            ) : null}
+          </div>
+        </>
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {reversed.map((img, reverseIdx) => {
-            const key = `${img.at}-${reverseIdx}`;
-            const busy = busyKey === key;
-            return (
-              <div key={key} style={{ display: "grid", gap: 6 }}>
-                <div className="kv" style={{ justifyContent: "space-between" }}>
-                  <div className="kv">
-                    <span className="tag">{img.title}</span>
-                    <small className="muted">{img.at}</small>
-                  </div>
-                  <button onClick={() => onReroll(reverseIdx)} disabled={busy || !img.promptUsed}>
-                    {busy ? "Re-rolling…" : "Re-roll"}
-                  </button>
-                </div>
-
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  alt={img.title}
-                  src={`data:image/png;base64,${img.b64}`}
-                  style={{ width: "100%", borderRadius: 10, border: "1px solid #e5e7eb" }}
-                />
-                {img.caption ? <small className="muted">{img.caption}</small> : null}
-              </div>
-            );
-          })}
-        </div>
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img alt="Welcome To Society" src="/welcome-society.png" className="stageImageFull" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img alt="Society logo" src="/society_logo.png" className="centerLogo" />
+          <div className="floatingCaption">
+            {!introStarted ? (
+                  <p className="welcomeBody">
+                    Worlds built on imagination.<br />
+                    <button
+                      className="startLink"
+                      onClick={() => {
+                        setIntroStarted(true);
+                        window.dispatchEvent(new Event("society-start"));
+                      }}
+                    >
+                      Press Start to begin
+                    </button>
+                    .
+                  </p>
+            ) : (
+              <p>
+                {coreChoice
+                  ? `You chose: ${coreChoice}`
+                  : "WHAT IS THE MOST IMPORTANT THING IN YOUR SOCIETY?"}
+              </p>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

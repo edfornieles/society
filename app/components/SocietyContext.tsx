@@ -5,7 +5,7 @@ import type { SocietyBible } from "@/lib/societyBible";
 import { createEmptyBible } from "@/lib/societyBible";
 import type { GeneratedImage } from "./ImageStrip";
 import type { SavedGame } from "@/lib/gameHistory";
-import { listGames } from "@/lib/gameHistory";
+import { getGame, listGames } from "@/lib/gameHistory";
 
 type SocietyState = {
   bible: SocietyBible;
@@ -36,6 +36,29 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     // Load saved games list once on mount.
     listGames().then(setHistory).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const lastId = window.localStorage.getItem("society:lastSessionId");
+    if (!lastId || sessionId) return;
+    getGame(lastId)
+      .then((g) => {
+        if (!g) return;
+        setBible(g.bible);
+        setImages(g.images);
+        setFinalRecord(g.finalRecordText ?? "");
+        setSummary(g.summary ?? "");
+        setSessionId(g.id);
+      })
+      .catch(() => {});
+  }, [sessionId, setBible, setImages, setFinalRecord, setSummary, setSessionId]);
+
+  useEffect(() => {
+    if (sessionId) {
+      window.localStorage.setItem("society:lastSessionId", sessionId);
+    } else {
+      window.localStorage.removeItem("society:lastSessionId");
+    }
+  }, [sessionId]);
 
   const value = useMemo(
     () => ({

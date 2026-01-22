@@ -96,9 +96,11 @@ export function VoiceConsole() {
       // Remote audio playback
       const audio = new Audio();
       audio.autoplay = true;
+      audio.playsInline = true;
       remoteAudioRef.current = audio;
       pc.ontrack = (e) => {
         audio.srcObject = e.streams[0];
+        audio.play().catch(() => {});
       };
 
       // Local mic

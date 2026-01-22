@@ -95,8 +95,8 @@ export function GameShell() {
               />
             </div>
             <button onClick={() => setShowRules((v) => !v)}>{showRules ? "Hide rules" : "Rules"}</button>
-            <button onClick={() => setShowSettings((v) => !v)} aria-label="Settings">
-              ⚙
+            <button onClick={() => setShowSettings((v) => !v)}>
+              Settings
             </button>
           </div>
         </nav>

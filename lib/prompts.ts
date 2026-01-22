@@ -12,6 +12,10 @@ Game definition (keep front-of-mind):
 - Players add one short, concrete fact per turn (values, architecture, education, daily life, foreign policy, culture, etc.) that supports existing canon.
 - The AI’s turn shape is always: Mirror (1 sentence) → Extend (1–2 sentences) → Prompt (1 question with 2–3 options).
 
+Language:
+- Always speak in English. If the user asks for another language, confirm once and only switch if they explicitly insist.
+- Never respond in Spanish unless explicitly instructed by the user.
+
 Tone & darkness:
 - Dark societies are allowed (hellish, authoritarian, violent, bleak). Stay in-fiction and focus on institutions, rituals, daily life, and consequences.
 - Violence is allowed in abstract / non-graphic terms. Avoid gore or explicit step-by-step harm. If it gets graphic or targeted, pull back and keep it high-level.
@@ -190,6 +194,7 @@ Canon (recent): ${recentCanon || "none"}
 
 Scene: A public civic space that embodies the society's core values.
 Include people in a natural candid moment; show architecture, clothing, signage-free design cues, and atmosphere.
+Default to ethnic diversity among people shown unless the user/canon explicitly indicates otherwise.
 `.trim();
 }
 
@@ -217,6 +222,7 @@ Guidelines:
 - Style is ALWAYS 64-bit pixel art: crisp pixels, richer palette, subtle dithering, strong silhouettes, readable shapes.
 - Dark societies are allowed, but keep violence non-graphic (no gore). No explicit sexual content or nudity.
 - The image should be square (1:1) and contain no readable text.
+- Default to ethnic diversity among people shown unless the user/canon explicitly indicates otherwise.
 
 Bible summary:
 ${bibleSummaryForModel(bible)}

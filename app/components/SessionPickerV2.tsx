@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useSociety } from "./SocietyContext";
-import { getGame, listGames } from "@/lib/gameHistory";
+import { getGame, listGames, normalizeSavedGame, saveGame } from "@/lib/gameHistory";
 
 export function SessionPickerV2({
   disabled,
@@ -22,6 +22,9 @@ export function SessionPickerV2({
   useEffect(() => {
     // Load/refresh on mount
     listGames().then(setHistory).catch(() => {});
+    const handler = () => listGames().then(setHistory).catch(() => {});
+    window.addEventListener("society-sessions-updated", handler);
+    return () => window.removeEventListener("society-sessions-updated", handler);
   }, [setHistory]);
 
   const onSelect = async (id: string) => {
@@ -31,11 +34,15 @@ export function SessionPickerV2({
     try {
       const g = await getGame(id);
       if (!g) return;
-      setBible(g.bible);
-      setImages(g.images);
-      setFinalRecord(g.finalRecordText ?? "");
-      setSummary(g.summary ?? "");
-      setSessionId(g.id);
+      const normalized = normalizeSavedGame(g);
+      if (normalized.changed) {
+        await saveGame(normalized.game);
+      }
+      setBible(normalized.game.bible);
+      setImages(normalized.game.images);
+      setFinalRecord(normalized.game.finalRecordText ?? "");
+      setSummary(normalized.game.summary ?? "");
+      setSessionId(normalized.game.id);
       onSessionLoaded?.();    } finally {
       setLoading(false);
     }

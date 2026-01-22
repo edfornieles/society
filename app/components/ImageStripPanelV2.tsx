@@ -94,7 +94,7 @@ export function ImageStripPanelV2() {
   const current = images[activeIndex] ?? images[images.length - 1];
   const canPrev = activeIndex > 0;
   const canNext = activeIndex < images.length - 1;
-  const coreChoice = String(bible.lastUserUtterance ?? bible.canon.coreValues?.[0] ?? bible.changelog?.[0]?.entry ?? "").trim();
+  const coreChoice = String(bible.canon.coreValues?.[0] ?? bible.lastUserUtterance ?? bible.changelog?.[0]?.entry ?? "").trim();
   const showPrompt = introStarted && !coreChoice;
   const showCoreChoiceUntilImage = introStarted && coreChoice && images.length === 0;
   const rawCaption = current?.caption?.trim() ?? "";

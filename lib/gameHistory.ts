@@ -5,6 +5,7 @@ export type SavedGame = {
   id: string;
   createdAt: number;
   title?: string;
+  titleIsCustom?: boolean;
   finalRecordText?: string;
   summary?: string;
   bible: SocietyBible;
@@ -70,8 +71,55 @@ function deriveCoreChoice(bible: SocietyBible, summary?: string): string {
 function formatSessionTitle(coreChoice: string): string {
   const cleaned = cleanCoreChoice(coreChoice);
   if (!cleaned) return "";
-  const words = cleaned.split(" ").filter(Boolean).slice(0, 3);
-  return words.join(" ");
+  const stopWords = new Set([
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "to",
+    "in",
+    "on",
+    "for",
+    "with",
+    "by",
+    "from",
+    "about",
+    "is",
+    "are",
+    "be",
+    "being",
+    "through",
+  ]);
+  const words = cleaned
+    .split(" ")
+    .map((w) => w.trim())
+    .filter(Boolean);
+  const keywords = words.filter((w) => !stopWords.has(w.toLowerCase()));
+  const picked = (keywords.length ? keywords : words).slice(0, 3);
+  return picked.join(" ");
+}
+
+function isGenericTitle(title?: string): boolean {
+  if (!title) return true;
+  return /society\s+\d{4}|participants have started|session started|the society/i.test(title);
+}
+
+export function normalizeSavedGame(game: SavedGame): { game: SavedGame; changed: boolean } {
+  const core = deriveCoreChoice(game.bible, game.summary);
+  if (!core) return { game, changed: false };
+  const formatted = formatSessionTitle(core);
+  let changed = false;
+  const next = structuredClone(game);
+  if (!next.bible?.canon?.coreValues?.[0]) {
+    next.bible.canon.coreValues[0] = core;
+    changed = true;
+  }
+  if (!next.titleIsCustom && formatted && (isGenericTitle(next.title) || next.title !== formatted)) {
+    next.title = formatted;
+    changed = true;
+  }
+  return { game: changed ? next : game, changed };
 }
 
 const DB_NAME = "society";
@@ -115,16 +163,8 @@ export async function listGames(): Promise<Pick<SavedGame, "id" | "createdAt" | 
   // Migrate titles to the new format when possible.
   const updates = rows
     .map((g) => {
-      const core = deriveCoreChoice(g.bible, g.summary);
-      if (!core) return null;
-      const formatted = formatSessionTitle(core);
-      const needsTitle = formatted && g.title !== formatted;
-      const needsCore = !g.bible?.canon?.coreValues?.[0];
-      if (!needsTitle && !needsCore) return null;
-      const next = structuredClone(g);
-      if (needsTitle) next.title = formatted;
-      if (needsCore) next.bible.canon.coreValues[0] = core;
-      return next;
+      const normalized = normalizeSavedGame(g);
+      return normalized.changed ? normalized.game : null;
     })
     .filter(Boolean) as SavedGame[];
   if (updates.length) {
@@ -138,7 +178,8 @@ export async function listGames(): Promise<Pick<SavedGame, "id" | "createdAt" | 
     .map((g) => {
       const core = deriveCoreChoice(g.bible, g.summary);
       const formatted = formatSessionTitle(core);
-      return { id: g.id, createdAt: g.createdAt, title: formatted || g.title };
+      const title = g.titleIsCustom ? g.title : formatted || g.title;
+      return { id: g.id, createdAt: g.createdAt, title };
     })
     .sort((a, b) => b.createdAt - a.createdAt);
 }

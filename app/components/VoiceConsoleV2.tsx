@@ -69,7 +69,7 @@ function formatSessionTitle(coreChoice: string) {
 }
 
 function pickSessionTitle(bible: typeof bibleRef.current, parsedCore?: string, parsedTitle?: string) {
-  const core0 = String(parsedCore ?? bible?.canon?.coreValues?.[0] ?? "").trim();
+  const core0 = String(parsedCore ?? bible?.canon?.coreValues?.[0] ?? getCoreChoice(bible) ?? "").trim();
   const formatted = formatSessionTitle(core0 || "");
   if (formatted) return formatted;
   if (parsedTitle) return formatSessionTitle(String(parsedTitle).trim());
@@ -88,8 +88,8 @@ function getCoreChoice(bible: typeof bibleRef.current) {
   const explicit = String(bible?.canon?.coreValues?.[0] ?? "").trim();
   const lastUser = String(bible?.lastUserUtterance ?? "").trim();
   const genericPattern = /started a session|session started|participants have started|society places|central value|shapes all aspects of life/i;
-  if (lastUser && !genericPattern.test(lastUser)) return lastUser;
   if (explicit) return explicit;
+  if (lastUser && !genericPattern.test(lastUser)) return lastUser;
   const firstCanon = bible.changelog
     .slice()
     .sort((a, b) => a.turn - b.turn)
@@ -158,6 +158,13 @@ export function VoiceConsoleV2({
   const dcRef = useRef<RTCDataChannel | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const pausedRef = useRef(false);
+  const aiSpeakingRef = useRef(false);
+  const aiSpeechTimeoutRef = useRef<number | null>(null);
+  const waveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const waveRafRef = useRef<number | null>(null);
 
   const lastAssistantTranscriptRef = useRef<string>("");
   const lastAutoImageTurnRef = useRef<number>(0);
@@ -178,12 +185,63 @@ export function VoiceConsoleV2({
   }, [bible]);
 
   useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
+  const drawWaveBaseline = () => {
+    const canvas = waveCanvasRef.current;
+    if (!canvas) return;
+    const ctx2d = canvas.getContext("2d");
+    if (!ctx2d) return;
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx2d.clearRect(0, 0, width, height);
+    const barCount = 36;
+    const gap = 2;
+    const barWidth = Math.max(4, Math.floor(width / barCount) - gap);
+    const totalWidth = barCount * barWidth + (barCount - 1) * gap;
+    const offsetX = Math.max(0, Math.floor((width - totalWidth) / 2));
+    const midY = Math.floor(height / 2);
+    const baseHeight = 6;
+    for (let i = 0; i < barCount; i += 1) {
+      const x = offsetX + i * (barWidth + gap);
+      const y = midY - baseHeight;
+      ctx2d.fillStyle = "#d41a12";
+      ctx2d.fillRect(x, y, barWidth, baseHeight * 2);
+      ctx2d.fillStyle = "rgba(255, 200, 190, 0.6)";
+      ctx2d.fillRect(x, midY + baseHeight - 4, barWidth, 4);
+    }
+  };
+
+  useEffect(() => {
+    drawWaveBaseline();
+  }, []);
+
+  const setMicEnabled = (enabled: boolean) => {
+    const local = localStreamRef.current;
+    if (!local) return;
+    local.getAudioTracks().forEach((t) => {
+      t.enabled = enabled;
+    });
+  };
+
+  useEffect(() => {
     imagesRef.current = images;
   }, [images]);
 
   useEffect(() => {
     summaryRef.current = summary;
   }, [summary]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    (async () => {
+      const existing = await getGame(sessionId);
+      if (existing?.title) {
+        setEditTitle(existing.title);
+      }
+    })().catch(() => {});
+  }, [sessionId]);
 
   useEffect(() => {
     startModeRef.current = resumeMode;
@@ -287,6 +345,13 @@ export function VoiceConsoleV2({
     setPaused(false);
     window.dispatchEvent(new Event("society-started"));
     try {
+      if (
+        startModeRef.current === "new" &&
+        sessionIdRef.current &&
+        (imagesRef.current.length > 0 || bibleRef.current.turnCount > 0)
+      ) {
+        startModeRef.current = "continue";
+      }
       if (startModeRef.current === "continue" && !sessionIdRef.current) {
         setConnecting(false);
         window.setTimeout(() => start(), 120);
@@ -313,9 +378,61 @@ export function VoiceConsoleV2({
       // Remote audio playback
       const audio = new Audio();
       audio.autoplay = true;
+      audio.playsInline = true;
       remoteAudioRef.current = audio;
       pc.ontrack = (e) => {
         audio.srcObject = e.streams[0];
+        audio.play().catch(() => {});
+        const ctx = new AudioContext();
+        audioContextRef.current = ctx;
+        const source = ctx.createMediaStreamSource(e.streams[0]);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyserRef.current = analyser;
+        source.connect(analyser);
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const canvas = waveCanvasRef.current;
+        if (canvas) {
+          const draw = () => {
+            analyser.getByteFrequencyData(dataArray);
+            const ctx2d = canvas.getContext("2d");
+            if (!ctx2d) return;
+            const width = canvas.width;
+            const height = canvas.height;
+            ctx2d.clearRect(0, 0, width, height);
+            const barCount = 36;
+            const gap = 2;
+            const step = Math.max(1, Math.floor(dataArray.length / barCount));
+            const barWidth = Math.max(4, Math.floor(width / barCount) - gap);
+            const totalWidth = barCount * barWidth + (barCount - 1) * gap;
+            const offsetX = Math.max(0, Math.floor((width - totalWidth) / 2));
+            const midY = Math.floor(height / 2);
+            const activeCount = 34;
+            const centerOffset = (barCount - 1) / 2;
+            const radius = Math.max(1, activeCount / 2);
+            for (let i = 0; i < barCount; i += 1) {
+              const distance = Math.abs(i - centerOffset);
+              const sampleIndex = Math.min(
+                dataArray.length - 1,
+                Math.floor((distance / radius) * (dataArray.length - 1))
+              );
+              const v = dataArray[sampleIndex] / 255;
+              const isActive = distance <= radius;
+              const weight = Math.max(0, 1 - distance / radius);
+              const baseHeight = 6;
+              const barHeight = Math.max(baseHeight, Math.floor(v * weight * height));
+              const drawHeight = isActive ? barHeight : baseHeight;
+              const x = offsetX + i * (barWidth + gap);
+              const y = midY - drawHeight;
+              ctx2d.fillStyle = "#d41a12";
+              ctx2d.fillRect(x, y, barWidth, drawHeight * 2);
+              ctx2d.fillStyle = "rgba(255, 200, 190, 0.6)";
+              ctx2d.fillRect(x, midY + drawHeight - 4, barWidth, 4);
+            }
+            waveRafRef.current = requestAnimationFrame(draw);
+          };
+          draw();
+        }
       };
 
       // Local mic
@@ -341,20 +458,19 @@ export function VoiceConsoleV2({
         // Note: voice must match the server session voice before the first audio response.
         sendSessionInstructions();
 
-        const effectiveMode =
-          startModeRef.current === "new" && bibleRef.current.turnCount > 0 ? "continue" : startModeRef.current;
+        const effectiveMode = startModeRef.current;
 
         if (effectiveMode === "recap") {
           const captions = imagesRef.current.map((i) => i.caption || i.title || "").filter(Boolean);
           if (imagesRef.current.length > 0) {
             window.dispatchEvent(
-              new CustomEvent("society-recap-slideshow", { detail: { intervalMs: 4200 } })
+              new CustomEvent("society-recap-slideshow", { detail: { intervalMs: 7000 } })
             );
           }
-          sendEvent(
+        sendEvent(
             mkResponseCreate({
-              output_modalities: ["audio"],
-              instructions: recapNarrationPrompt(bibleRef.current, captions),
+            output_modalities: ["audio"],
+              instructions: `Respond only in English. ${recapNarrationPrompt(bibleRef.current, captions)}`,
               metadata: { topic: "recap_spoken" },
             })
           );
@@ -364,21 +480,21 @@ export function VoiceConsoleV2({
             mkResponseCreate({
               output_modalities: ["audio"],
               instructions:
-                "Warmly welcome the player back and continue seamlessly from the existing canon summary above. In one short sentence, remind them of the core value of this society. Then prompt the next addition with one short, open question and 2–3 options. Do not invent new facts. Keep it concise.",
+                "Respond only in English. Warmly welcome the player back and continue seamlessly from the existing canon summary above. In one short sentence, remind them of the core value of this society. Then prompt the next addition with one short, open question and 2–3 options. Do not invent new facts. Keep it concise.",
               metadata: { topic: "resume" },
             })
           );
           startModeRef.current = "new";
         } else {
-          // Send a proactive greeting so the AI immediately invites the user to play.
-          sendEvent(
-            mkResponseCreate({
-              output_modalities: ["audio"],
-              instructions:
-                "Greet warmly in a relaxed tone, then invite the first move. Explain they should start by saying what the most important thing in this society is, and that everything else follows from that starting point. Mention it can be anything. Optionally offer 2–3 example answers (e.g., empathy, honor, efficiency). Keep it short and speakable.",
-              metadata: { topic: "greeting" },
-            })
-          );
+        // Send a proactive greeting so the AI immediately invites the user to play.
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions:
+                "Respond only in English. Greet warmly in a relaxed tone, then invite the first move. Explain they should start by saying what the most important thing in this society is, and that everything else follows from that starting point. Mention it can be anything. Optionally offer 2–3 example answers (e.g., empathy, honor, efficiency). Keep it short and speakable.",
+            metadata: { topic: "greeting" },
+          })
+        );
         }
       };
 
@@ -422,6 +538,11 @@ export function VoiceConsoleV2({
     setConnecting(false);
     setStopping(false);
     setPaused(false);
+    if (aiSpeechTimeoutRef.current) {
+      window.clearTimeout(aiSpeechTimeoutRef.current);
+      aiSpeechTimeoutRef.current = null;
+    }
+    aiSpeakingRef.current = false;
     const dc = dcRef.current;
     if (dc) {
       try { dc.close(); } catch {}
@@ -437,6 +558,16 @@ export function VoiceConsoleV2({
       try { audio.srcObject = null; } catch {}
       remoteAudioRef.current = null;
     }
+    if (waveRafRef.current) {
+      cancelAnimationFrame(waveRafRef.current);
+      waveRafRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+      analyserRef.current = null;
+    }
+    drawWaveBaseline();
     const local = localStreamRef.current;
     if (local) {
       local.getTracks().forEach((t) => t.stop());
@@ -476,6 +607,7 @@ export function VoiceConsoleV2({
     try {
       await deleteGame(id);
       setHistory(await listGames());
+      window.dispatchEvent(new Event("society-sessions-updated"));
     } catch {
       // ignore delete failures
     }
@@ -487,18 +619,20 @@ export function VoiceConsoleV2({
   };
 
   const onRenameSession = async () => {
-    const id = sessionIdRef.current;
+    const id = sessionIdRef.current || sessionId;
     const nextTitle = editTitle.trim();
     if (!id || !nextTitle) return;
+    sessionIdRef.current = id;
     try {
       const existing = await getGame(id);
       if (existing) {
-        await saveGame({ ...existing, title: nextTitle });
+        await saveGame({ ...existing, title: nextTitle, titleIsCustom: true });
       } else {
         await saveGame({
           id,
           createdAt: Date.now(),
           title: nextTitle,
+          titleIsCustom: true,
           finalRecordText: finalRecord ?? "",
           summary: summaryRef.current,
           bible: bibleRef.current,
@@ -506,9 +640,10 @@ export function VoiceConsoleV2({
         });
       }
       setHistory(await listGames());
+      window.dispatchEvent(new Event("society-sessions-updated"));
       setLastSaveAt(new Date().toLocaleString());
       setLastSaveTitle(nextTitle);
-      setEditTitle("");
+      setEditTitle(nextTitle);
     } catch {
       // ignore rename failures
     }
@@ -542,6 +677,14 @@ export function VoiceConsoleV2({
 
     // Transcript deltas (audio transcript)
     if (evt.type === "response.output_audio_transcript.delta") {
+      if (!aiSpeakingRef.current) {
+        aiSpeakingRef.current = true;
+        setMicEnabled(false);
+      }
+      if (aiSpeechTimeoutRef.current) {
+        window.clearTimeout(aiSpeechTimeoutRef.current);
+        aiSpeechTimeoutRef.current = null;
+      }
       const delta = evt?.delta ?? "";
       setLiveTranscript((t) => t + delta);
       return;
@@ -565,7 +708,14 @@ export function VoiceConsoleV2({
         !isLikelyEcho(transcript, lastAssistantTranscriptRef.current) &&
         !tooSoon
       ) {
-        setBible((b) => ({ ...b, lastUserUtterance: transcript }));
+        setBible((b) => {
+          const next = structuredClone(b);
+          next.lastUserUtterance = transcript;
+          if (!next.canon.coreValues[0]) {
+            next.canon.coreValues[0] = transcript;
+          }
+          return next;
+        });
       }
       return;
     }
@@ -574,15 +724,15 @@ export function VoiceConsoleV2({
       const transcript = evt?.transcript ?? liveTranscript;
       lastAssistantTranscriptRef.current = transcript;
       lastAssistantAtRef.current = Date.now();
-      const pendingUser = String(lastUserTranscriptRef.current ?? "").trim();
-      if (pendingUser) {
-        const genericPattern = /started a session|session started|participants have started|society places|society values|central value|core value|central core|shapes all aspects|all other aspects|emerge|game is called society|society is called/i;
-        const tooSoon = Date.now() - lastAssistantAtRef.current < 5000;
-        if (!genericPattern.test(pendingUser) && !isLikelyEcho(pendingUser, transcript) && !tooSoon) {
-          setBible((b) => ({ ...b, lastUserUtterance: pendingUser }));
-        }
-        lastUserTranscriptRef.current = "";
+      aiSpeakingRef.current = false;
+      if (aiSpeechTimeoutRef.current) {
+        window.clearTimeout(aiSpeechTimeoutRef.current);
       }
+      aiSpeechTimeoutRef.current = window.setTimeout(() => {
+        if (!pausedRef.current) {
+          setMicEnabled(true);
+        }
+      }, 700);
       setBible((b) => ({ ...b, lastAiUtterance: transcript }));
       setLiveTranscript("");
 
@@ -895,7 +1045,7 @@ export function VoiceConsoleV2({
         conversation: "none",
         metadata: { topic: "recap" },
         output_modalities: ["text"],
-        instructions: recapPrompt(bible),
+        instructions: `Respond only in English. ${recapPrompt(bible)}`,
       })
     );
   };
@@ -917,7 +1067,7 @@ export function VoiceConsoleV2({
     if (!connected || !local) return;
     const next = !paused;
     local.getAudioTracks().forEach((t) => {
-      t.enabled = !next;
+      t.enabled = !next && !aiSpeakingRef.current;
     });
     setPaused(next);
     addLog("sys", next ? "Paused input." : "Resumed input.");
@@ -1045,10 +1195,10 @@ export function VoiceConsoleV2({
           </button>
           <span className={`statusLight ${connected ? "statusLight--on" : "statusLight--off"}`} />
         </div>
-      </div>
+        </div>
 
       <div className="liveTranscript">
-        {liveTranscript ? <pre>{liveTranscript}</pre> : <small className="muted">The AI voice appears here as it speaks.</small>}
+        <canvas className="aiWave" ref={waveCanvasRef} width={320} height={80} />
       </div>
 
       {showSettings ? (
@@ -1056,7 +1206,7 @@ export function VoiceConsoleV2({
           <div className="modalCard">
             <div className="modalHeader">
               <strong>Settings</strong>
-              <div className="kv">
+        <div className="kv">
                 {sessionId ? (
                   <button onClick={onDeleteSession} className="dangerButton">
                     Delete session
@@ -1068,35 +1218,72 @@ export function VoiceConsoleV2({
               </div>
             </div>
             <div className="modalBody vcSettingsGrid">
-              <label className="tag">
-                Voice{" "}
-                <select
-                  value={voice}
-                  disabled={connected || connecting}
-                  onChange={(e) => setVoice(e.target.value as any)}
+              {sessionId ? (
+                <div className="settingsRenameRow">
+                  <label className="tag">
+                    Session name{" "}
+                    <input
+                      className="sessionTitleInput"
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          onRenameSession();
+                        }
+                      }}
+                      placeholder="Session name"
+                    />
+                  </label>
+                  <button onClick={onRenameSession} type="button">
+                    Save
+                  </button>
+                  {lastSaveAt ? (
+                    <small className="saveStatus">
+                      Saved {lastSaveAt}{lastSaveTitle ? ` — ${lastSaveTitle}` : ""}
+                    </small>
+                  ) : null}
+                </div>
+              ) : null}
+              {sessionId ? (
+                <label className="tag">
+                  Core value{" "}
+                  <input
+                    className="sessionTitleInput"
+                    value={bible.canon.coreValues?.[0] ?? bible.lastUserUtterance ?? ""}
+                    readOnly
+                  />
+                </label>
+              ) : null}
+          <label className="tag">
+            Voice{" "}
+            <select
+              value={voice}
+              disabled={connected || connecting}
+              onChange={(e) => setVoice(e.target.value as any)}
                   className="vcFieldSpacing"
-                >
-                  {VOICES.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="tag">
-                Play{" "}
-                <select
-                  value={playfulness}
-                  disabled={connected || connecting}
-                  onChange={(e) => setPlayfulness(Number(e.target.value) as Playfulness)}
+            >
+              {VOICES.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="tag">
+            Play{" "}
+            <select
+              value={playfulness}
+              disabled={connected || connecting}
+              onChange={(e) => setPlayfulness(Number(e.target.value) as Playfulness)}
                   className="vcFieldSpacing"
-                >
-                  <option value={0}>0</option>
-                  <option value={1}>1</option>
-                  <option value={2}>2</option>
-                  <option value={3}>3</option>
-                </select>
-              </label>
+            >
+              <option value={0}>0</option>
+              <option value={1}>1</option>
+              <option value={2}>2</option>
+              <option value={3}>3</option>
+            </select>
+          </label>
               <label className="tag">
                 Players{" "}
                 <input
@@ -1108,47 +1295,47 @@ export function VoiceConsoleV2({
                   className="vcNumberInput"
                 />
               </label>
-              <label className="tag">
-                Auto images{" "}
-                <input
-                  type="checkbox"
-                  checked={autoImages}
-                  onChange={(e) => setAutoImages(e.target.checked)}
+        <label className="tag">
+          Auto images{" "}
+          <input
+            type="checkbox"
+            checked={autoImages}
+            onChange={(e) => setAutoImages(e.target.checked)}
                   className="vcFieldSpacing"
-                />
-              </label>
-              <label className="tag">
-                Every{" "}
-                <select
-                  value={autoEveryTurns}
-                  onChange={(e) => setAutoEveryTurns(Number(e.target.value))}
+          />
+        </label>
+        <label className="tag">
+          Every{" "}
+          <select
+            value={autoEveryTurns}
+            onChange={(e) => setAutoEveryTurns(Number(e.target.value))}
                   className="vcFieldSpacing"
-                >
-                  <option value={1}>1 turn</option>
-                  <option value={2}>2 turns</option>
-                  <option value={3}>3 turns</option>
-                  <option value={4}>4 turns</option>
-                </select>
-              </label>
+          >
+            <option value={1}>1 turn</option>
+            <option value={2}>2 turns</option>
+            <option value={3}>3 turns</option>
+            <option value={4}>4 turns</option>
+          </select>
+        </label>
               <span className="tag">Wear headphones to avoid echo.</span>
 
               <details>
                 <summary className="muted">Event log</summary>
                 <div className="card vcLogCard">
-                  {log.length === 0 ? (
-                    <small className="muted">No events yet.</small>
-                  ) : (
+            {log.length === 0 ? (
+              <small className="muted">No events yet.</small>
+            ) : (
                     <div className="vcLogList">
-                      {log.slice().reverse().slice(0, 120).map((l, i) => (
-                        <div key={i}>
-                          <span className="tag">{l.at}</span>{" "}
-                          <span className="tag">{l.dir}</span>{" "}
+                {log.slice().reverse().slice(0, 120).map((l, i) => (
+                  <div key={i}>
+                    <span className="tag">{l.at}</span>{" "}
+                    <span className="tag">{l.dir}</span>{" "}
                           <span className="vcLogText">{l.text}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
               </details>
 
               <details>
@@ -1163,20 +1350,7 @@ export function VoiceConsoleV2({
                         Delete session
                       </button>
                     ) : null}
-                  </div>
-                  {sessionId ? (
-                    <div className="kv vcSummaryActions">
-                      <input
-                        className="sessionTitleInput"
-                        placeholder="Rename session..."
-                        value={editTitle}
-                        onChange={(e) => setEditTitle(e.target.value)}
-                      />
-                      <button onClick={onRenameSession} disabled={!editTitle.trim()}>
-                        Save title
-                      </button>
-                    </div>
-                  ) : null}
+      </div>
                   {lastSaveAt ? (
                     <small className="muted">
                       Last saved: {lastSaveAt}{lastSaveTitle ? ` — ${lastSaveTitle}` : ""}

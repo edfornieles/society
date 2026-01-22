@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { useSociety } from "./SocietyContext";
-import { deleteGame, getGame, listGames } from "@/lib/gameHistory";
+import { deleteGame, getGame, listGames, normalizeSavedGame, saveGame } from "@/lib/gameHistory";
 
 export function HistoryPanelV2() {
-  const { setBible, setImages, setFinalRecord, history, setHistory } = useSociety();
+  const { setBible, setImages, setFinalRecord, setSummary, setSessionId, history, setHistory } = useSociety();
   const [loadingId, setLoadingId] = useState<string>("");
 
   const onRefresh = async () => {
@@ -17,9 +17,15 @@ export function HistoryPanelV2() {
     try {
       const g = await getGame(id);
       if (!g) return;
-      setBible(g.bible);
-      setImages(g.images);
-      setFinalRecord(g.finalRecordText ?? "");
+      const normalized = normalizeSavedGame(g);
+      if (normalized.changed) {
+        await saveGame(normalized.game);
+      }
+      setBible(normalized.game.bible);
+      setImages(normalized.game.images);
+      setFinalRecord(normalized.game.finalRecordText ?? "");
+      setSummary(normalized.game.summary ?? "");
+      setSessionId(normalized.game.id);
     } finally {
       setLoadingId("");
     }

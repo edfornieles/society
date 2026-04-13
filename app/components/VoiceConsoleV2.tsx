@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { bumpTurn, addCanonLines, addOpenThreads } from "@/lib/societyBible";
+import { bumpTurn, addCanonLines, addOpenThreads, createEmptyBible } from "@/lib/societyBible";
+import type { SocietyBible } from "@/lib/societyBible";
 import { useSociety } from "./SocietyContext";
 import { saveGame, listGames, deleteGame, getGame } from "@/lib/gameHistory";
 import {
@@ -10,13 +11,14 @@ import {
   oobUpdatePrompt,
   recapPrompt,
   finalBreakdownPrompt,
-  imageSceneProposalPrompt,
   imagePromptFromBible,
   recapNarrationPrompt,
   Playfulness,
 } from "@/lib/prompts";
 import { safeJsonParse, sanitizeUpdate } from "@/lib/guardrails";
-import { mkSessionUpdate, mkResponseCreate } from "@/lib/realtimeEvents";
+import { isSpuriousUserTranscript } from "@/lib/transcriptGuards";
+import { normalizeCoreValueUtterance, extractCoreTopicPhrase } from "@/lib/coreValueNormalize";
+import { mkSessionUpdate, mkResponseCreate, mkResponseCancel } from "@/lib/realtimeEvents";
 import type { GeneratedImage } from "./ImageStrip";
 
 type LogLine = { at: string; dir: "in" | "out" | "sys"; text: string };
@@ -34,6 +36,10 @@ const DEFAULT_64BIT_STYLE_GUIDE =
   "64-bit retro pixel art (late PS1/N64-era). Crisp pixels with richer detail, broader palette, subtle dithering, strong silhouettes, readable shapes. Cozy cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
 
 const IMAGE_SIZE = "1536x1024";
+const USER_TURN_SILENCE_MS = 2200;
+const USER_TURN_PREFIX_PADDING_MS = 500;
+const ENGLISH_ONLY_INSTRUCTION =
+  "ABSOLUTE RULE: Respond ONLY in English (American or British wording). Never speak Russian, Ukrainian, or any Cyrillic-script language; never German, Dutch, French, Spanish, Italian, Portuguese, or any other language — no code-switching, no mirroring the user's language, no foreign filler words. Do not use Cyrillic in speech. Stay in English even if the user has a non-English accent. No exceptions.";
 
 function normalizeText(text: string) {
   return text.toLowerCase().replace(/[^a-z0-9\s]+/g, "").replace(/\s+/g, " ").trim();
@@ -48,7 +54,10 @@ function isLikelyEcho(userText: string, assistantText: string) {
 }
 
 function formatSessionTitle(coreChoice: string) {
-  const cleaned = coreChoice.replace(/\s+/g, " ").trim();
+  const collapsed = extractCoreTopicPhrase(
+    normalizeCoreValueUtterance(coreChoice.replace(/\s+/g, " ").trim())
+  );
+  const cleaned = collapsed.replace(/\s+/g, " ").trim();
   if (!cleaned) return "";
   const truncated = cleaned.length > 48 ? `${cleaned.slice(0, 45)}…` : cleaned;
   const lowered = truncated.toLowerCase();
@@ -68,7 +77,7 @@ function formatSessionTitle(coreChoice: string) {
   return words.join(" ");
 }
 
-function pickSessionTitle(bible: typeof bibleRef.current, parsedCore?: string, parsedTitle?: string) {
+function pickSessionTitle(bible: SocietyBible, parsedCore?: string, parsedTitle?: string) {
   const core0 = String(parsedCore ?? bible?.canon?.coreValues?.[0] ?? getCoreChoice(bible) ?? "").trim();
   const formatted = formatSessionTitle(core0 || "");
   if (formatted) return formatted;
@@ -84,7 +93,7 @@ function pickSessionTitle(bible: typeof bibleRef.current, parsedCore?: string, p
   return formatSessionTitle(firstCanon || "") || `Society ${new Date().toLocaleString()}`;
 }
 
-function getCoreChoice(bible: typeof bibleRef.current) {
+function getCoreChoice(bible: SocietyBible) {
   const explicit = String(bible?.canon?.coreValues?.[0] ?? "").trim();
   const lastUser = String(bible?.lastUserUtterance ?? "").trim();
   const genericPattern = /started a session|session started|participants have started|society places|central value|shapes all aspects of life/i;
@@ -179,6 +188,13 @@ export function VoiceConsoleV2({
   const lastUserTranscriptRef = useRef<string>("");
   const lastAssistantAtRef = useRef<number>(0);
   const resumeAfterConnectRef = useRef(false);
+  // "pre_core" = before the player has answered the core question (onboarding)
+  // "done"     = normal gameplay, server auto-responses are active
+  const onboardingPhaseRef = useRef<"pre_core" | "done">("done");
+  /** Bumps whenever `stop()` runs so in-flight `start()` can abort after async gaps (e.g. getUserMedia). */
+  const startGenRef = useRef(0);
+  /** One-time pointer listener if the browser blocks remote audio.play() (autoplay policy). */
+  const audioUnlockListenerRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     bibleRef.current = bible;
@@ -223,6 +239,19 @@ export function VoiceConsoleV2({
     local.getAudioTracks().forEach((t) => {
       t.enabled = enabled;
     });
+  };
+
+  const releaseMicAfterAssistant = () => {
+    aiSpeakingRef.current = false;
+    if (aiSpeechTimeoutRef.current) {
+      window.clearTimeout(aiSpeechTimeoutRef.current);
+      aiSpeechTimeoutRef.current = null;
+    }
+    aiSpeechTimeoutRef.current = window.setTimeout(() => {
+      if (!pausedRef.current) {
+        setMicEnabled(true);
+      }
+    }, 250);
   };
 
   useEffect(() => {
@@ -298,7 +327,8 @@ export function VoiceConsoleV2({
       {
         type: "function",
         name: "society_propose_image_scene",
-        description: "Propose a vivid image scene prompt that illustrates the society consistently with canon.",
+        description:
+          "Propose an image scene tied to concrete canon from this session (named rituals, objects, places from the Society Bible). Do not suggest generic civic or fantasy filler unrelated to established facts.",
         parameters: {
           type: "object",
           properties: {
@@ -322,13 +352,56 @@ export function VoiceConsoleV2({
     addLog("out", JSON.stringify(evt));
   };
 
-  const sendSessionInstructions = () => {
-    const sessionInstructions = `${systemInstructions(playfulness)}\n\n${bibleSummaryForModel(bibleRef.current)}`;
+  const makeTurnDetection = (createResponse: boolean) => ({
+    type: "server_vad",
+    threshold: 0.5,
+    prefix_padding_ms: USER_TURN_PREFIX_PADDING_MS,
+    silence_duration_ms: USER_TURN_SILENCE_MS,
+    create_response: createResponse,
+    interrupt_response: true,
+  });
+
+  const enableAutoResponse = () => {
     sendEvent(
       mkSessionUpdate({
-        type: "realtime",
-        model: "gpt-realtime",
+        audio: { input: { turn_detection: makeTurnDetection(true) } },
+      })
+    );
+  };
+
+  /** Fire-and-forget structured log entry to data/logs/{sessionId}.log */
+  const debugLog = (event: string, data?: Record<string, unknown>) => {
+    const id = sessionIdRef.current || "pre-session";
+    fetch("/api/debug-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: id, event, data }),
+    }).catch(() => {});
+  };
+
+  const sendSessionInstructions = (createResponse = true) => {
+    const coreValue = bibleRef.current?.canon?.coreValues?.[0] ?? "";
+    // Pass coreValue into systemInstructions so the prompt switches from
+    // "session start / ask the core question" to "gameplay mode" once the
+    // foundation is established. This prevents the model from treating every
+    // turn as if it's still waiting for the player to name their core value.
+    const sessionInstructions = `${systemInstructions(playfulness, coreValue || undefined)}\n\n${bibleSummaryForModel(bibleRef.current)}`;
+    debugLog("SESSION_UPDATE_SENT", {
+      createResponse: String(createResponse),
+      coreValue: coreValue || "(none)",
+      instructionsPreview: sessionInstructions.slice(0, 800),
+    });
+    // Note: session.update does NOT accept "type" or "model" fields — those
+    // are creation-only. Including them can cause the server to reject the
+    // entire update, which was silently discarding our instructions.
+    sendEvent(
+      mkSessionUpdate({
         output_modalities: ["audio"],
+        audio: {
+          input: {
+            turn_detection: makeTurnDetection(createResponse),
+          },
+        },
         instructions: sessionInstructions,
         tools,
         tool_choice: "auto",
@@ -340,11 +413,21 @@ export function VoiceConsoleV2({
     if (connecting || connected) {
       stop();
     }
+    const myGen = ++startGenRef.current;
     setConnecting(true);
     setLiveTranscript("");
     setPaused(false);
     window.dispatchEvent(new Event("society-started"));
     try {
+      // When explicitly starting a new game, reset stale refs immediately so we
+      // never accidentally fall into "continue" mode due to ref/state lag.
+      if (startModeRef.current === "new") {
+        sessionIdRef.current = "";
+        bibleRef.current = createEmptyBible();
+        imagesRef.current = [];
+      }
+
+      // Only auto-switch to continue if there is an explicit session ID already loaded.
       if (
         startModeRef.current === "new" &&
         sessionIdRef.current &&
@@ -352,12 +435,6 @@ export function VoiceConsoleV2({
       ) {
         startModeRef.current = "continue";
       }
-      if (startModeRef.current === "continue" && !sessionIdRef.current) {
-        setConnecting(false);
-        window.setTimeout(() => start(), 120);
-        return;
-      }
-      // If resuming a loaded session, wait until sessionId is set.
       if (startModeRef.current === "continue" && !sessionIdRef.current) {
         setConnecting(false);
         window.setTimeout(() => start(), 120);
@@ -378,13 +455,47 @@ export function VoiceConsoleV2({
       // Remote audio playback
       const audio = new Audio();
       audio.autoplay = true;
-      audio.playsInline = true;
+      // Safari / iOS: inline playback helps some builds route to speaker instead of silent failure.
+      try {
+        (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+      } catch {
+        /* ignore */
+      }
       remoteAudioRef.current = audio;
       pc.ontrack = (e) => {
+        if (audioUnlockListenerRef.current) {
+          try {
+            window.removeEventListener("pointerdown", audioUnlockListenerRef.current);
+          } catch {
+            /* ignore */
+          }
+          audioUnlockListenerRef.current = null;
+        }
         audio.srcObject = e.streams[0];
-        audio.play().catch(() => {});
-        const ctx = new AudioContext();
+        void audio
+          .play()
+          .then(() => {
+            addLog("sys", "Remote voice audio playing.");
+          })
+          .catch(() => {
+            addLog(
+              "sys",
+              "Speaker blocked by browser autoplay rules — tap or click anywhere once to hear the AI voice."
+            );
+            const unlock = () => {
+              void audio.play().catch(() => {});
+              window.removeEventListener("pointerdown", unlock);
+              audioUnlockListenerRef.current = null;
+            };
+            audioUnlockListenerRef.current = unlock;
+            window.addEventListener("pointerdown", unlock, { passive: true });
+          });
+        const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        const ctx = new Ctx();
         audioContextRef.current = ctx;
+        if (ctx.state === "suspended") {
+          void ctx.resume();
+        }
         const source = ctx.createMediaStreamSource(e.streams[0]);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 256;
@@ -443,59 +554,32 @@ export function VoiceConsoleV2({
           autoGainControl: true,
         },
       });
-      localStreamRef.current = ms;      pc.addTrack(ms.getAudioTracks()[0], ms);
+      if (myGen !== startGenRef.current) {
+        ms.getTracks().forEach((t) => t.stop());
+        setConnecting(false);
+        return;
+      }
+      localStreamRef.current = ms;
+      pc.addTrack(ms.getAudioTracks()[0], ms);
 
       // Data channel for events
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
 
       dc.onopen = () => {
-        addLog("sys", "Data channel open.");
+        addLog("sys", "Data channel open — waiting for session.created before sending config.");
         setConnected(true);
         setConnecting(false);
-
-        // Session guardrails + tool config.
-        // Note: voice must match the server session voice before the first audio response.
-        sendSessionInstructions();
-
-        const effectiveMode = startModeRef.current;
-
-        if (effectiveMode === "recap") {
-          const captions = imagesRef.current.map((i) => i.caption || i.title || "").filter(Boolean);
-          if (imagesRef.current.length > 0) {
-            window.dispatchEvent(
-              new CustomEvent("society-recap-slideshow", { detail: { intervalMs: 7000 } })
-            );
-          }
-        sendEvent(
-            mkResponseCreate({
-            output_modalities: ["audio"],
-              instructions: `Respond only in English. ${recapNarrationPrompt(bibleRef.current, captions)}`,
-              metadata: { topic: "recap_spoken" },
-            })
-          );
-          startModeRef.current = "continue";
-        } else if (effectiveMode === "continue") {
-          sendEvent(
-            mkResponseCreate({
-              output_modalities: ["audio"],
-              instructions:
-                "Respond only in English. Warmly welcome the player back and continue seamlessly from the existing canon summary above. In one short sentence, remind them of the core value of this society. Then prompt the next addition with one short, open question and 2–3 options. Do not invent new facts. Keep it concise.",
-              metadata: { topic: "resume" },
-            })
-          );
-          startModeRef.current = "new";
+        // Set the onboarding phase now so it's ready when session.created fires.
+        const isNewGame = startModeRef.current === "new";
+        if (isNewGame) {
+          onboardingPhaseRef.current = "pre_core";
         } else {
-        // Send a proactive greeting so the AI immediately invites the user to play.
-        sendEvent(
-          mkResponseCreate({
-            output_modalities: ["audio"],
-            instructions:
-                "Respond only in English. Greet warmly in a relaxed tone, then invite the first move. Explain they should start by saying what the most important thing in this society is, and that everything else follows from that starting point. Mention it can be anything. Optionally offer 2–3 example answers (e.g., empathy, honor, efficiency). Keep it short and speakable.",
-            metadata: { topic: "greeting" },
-          })
-        );
+          onboardingPhaseRef.current = "done";
         }
+        // Do NOT send session.update or response.create here.
+        // The server hasn't confirmed the session is ready yet.
+        // All initialisation happens in the session.created handler below.
       };
 
       dc.onmessage = (e) => handleServerEvent(e.data);
@@ -517,12 +601,21 @@ export function VoiceConsoleV2({
         body: offer.sdp,
       });
 
+      if (myGen !== startGenRef.current) {
+        setConnecting(false);
+        return;
+      }
+
       if (!sdpResp.ok) {
         const err = await sdpResp.text();
         throw new Error(err);
       }
 
       const answerSdp = await sdpResp.text();
+      if (myGen !== startGenRef.current) {
+        setConnecting(false);
+        return;
+      }
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
       addLog("sys", "WebRTC connected; waiting for session.created...");
@@ -534,6 +627,15 @@ export function VoiceConsoleV2({
   }
 
   function stop() {
+    startGenRef.current += 1;
+    if (audioUnlockListenerRef.current) {
+      try {
+        window.removeEventListener("pointerdown", audioUnlockListenerRef.current);
+      } catch {
+        /* ignore */
+      }
+      audioUnlockListenerRef.current = null;
+    }
     setConnected(false);
     setConnecting(false);
     setStopping(false);
@@ -581,23 +683,28 @@ export function VoiceConsoleV2({
     if (!id) return;
     const bibleToSave = bibleRef.current;
     const imagesToSave = imagesRef.current;
+    // Require at least the core value OR some gameplay to avoid saving empty shells.
     const coreChoice = getCoreChoice(bibleToSave);
-    if (!coreChoice) return;
+    const hasContent = !!coreChoice || bibleToSave.turnCount > 0 || imagesToSave.length > 0;
+    if (!hasContent) return;
     const title = pickSessionTitle(bibleToSave);
     try {
+      const existing = await getGame(id);
       await saveGame({
         id,
-        createdAt: Date.now(),
+        createdAt: existing?.createdAt ?? Date.now(),
         title,
+        titleIsCustom: existing?.titleIsCustom ?? false,
         finalRecordText: finalRecord ?? "",
         summary: summaryRef.current,
         bible: bibleToSave,
         images: imagesToSave,
       });
+      window.dispatchEvent(new Event("society-sessions-updated"));
       setLastSaveAt(new Date().toLocaleString());
       setLastSaveTitle(title);
-    } catch {
-      // ignore autosave failures
+    } catch (e) {
+      addLog("sys", `Save failed: ${String((e as Error)?.message ?? e)}`);
     }
   };
 
@@ -611,11 +718,12 @@ export function VoiceConsoleV2({
     } catch {
       // ignore delete failures
     }
+    sessionIdRef.current = "";
     setSessionId("");
     setSummary("");
     setFinalRecord("");
     setImages([]);
-    setBible((prev) => ({ ...prev, turnCount: 0, lastAiUtterance: "", changelog: [], openThreads: [] }));
+    setBible(createEmptyBible());
   };
 
   const onRenameSession = async () => {
@@ -673,7 +781,133 @@ export function VoiceConsoleV2({
     // Keep the log readable
     if (evt?.type) addLog("in", `${evt.type}`);
 
-    if (evt.type === "error") {    }
+    // Log every event type to disk so we can see exactly what the server sends.
+    // Once we've confirmed the correct event names we can remove this.
+    if (evt?.type && !evt.type.startsWith("response.output_audio_transcript.delta")) {
+      debugLog("SERVER_EVENT", { type: evt.type });
+    }
+
+    if (evt.type === "error") {
+      // If streaming fails mid-response, don't leave mic muted.
+      releaseMicAfterAssistant();
+      addLog("sys", `Server error: ${JSON.stringify(evt?.error ?? evt)}`);
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // session.created — the server has confirmed the session is live.
+    // THIS is the right moment to push session.update and the opening
+    // response.create. Sending them in dc.onopen (before this event) causes
+    // them to be silently dropped because the session isn't initialised yet.
+    // -----------------------------------------------------------------------
+    if (evt.type === "session.created") {
+      addLog("sys", "session.created — pushing config and opening prompt.");
+      const effectiveMode = startModeRef.current;
+      const isNewGame = effectiveMode === "new";
+      debugLog("SESSION_CREATED", {
+        mode: effectiveMode,
+        sessionId: sessionIdRef.current,
+        coreValue: bibleRef.current?.canon?.coreValues?.[0] || "(none)",
+        onboardingPhase: onboardingPhaseRef.current,
+      });
+
+      // Cancel any default auto-response the server fires in the brief window
+      // between session.created and our session.update being processed.
+      // Without this, the model says "Hey there! What's on your mind?" before
+      // our instructions arrive, and our real greeting gets queued then dropped.
+      sendEvent(mkResponseCancel());
+
+      if (isNewGame) {
+        sendSessionInstructions(false); // create_response:false during onboarding
+      } else {
+        sendSessionInstructions(true);
+      }
+
+      // Small delay so session.update is fully processed by the server before
+      // we send response.create. Without this, the response.create can fire
+      // before our instructions are applied and the model uses default behaviour.
+      await new Promise((r) => window.setTimeout(r, 450));
+
+      if (effectiveMode === "recap") {
+        const captions = imagesRef.current.map((i) => i.caption || i.title || "").filter(Boolean);
+        if (imagesRef.current.length > 0) {
+          window.dispatchEvent(
+            new CustomEvent("society-recap-slideshow", { detail: { intervalMs: 7000 } })
+          );
+        }
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions: `${ENGLISH_ONLY_INSTRUCTION} ${recapNarrationPrompt(bibleRef.current, captions)}`,
+            metadata: { topic: "recap_spoken" },
+          })
+        );
+        startModeRef.current = "continue";
+      } else if (effectiveMode === "continue") {
+        const resumeBible = bibleRef.current;
+        const coreValue = resumeBible.canon.coreValues?.[0] || resumeBible.lastUserUtterance || "";
+        const recentCanon =
+          resumeBible.changelog
+            .slice()
+            .sort((a, b) => a.turn - b.turn)
+            .slice(-8)
+            .map((c) => `- ${c.entry}`)
+            .join("\n") || "- (none yet)";
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions: `${ENGLISH_ONLY_INSTRUCTION}
+
+You are resuming an existing Society session. Treat everything below as hard canon — do NOT invent or contradict it.
+
+CORE VALUE: ${coreValue || "(not yet set)"}
+
+ESTABLISHED CANON:
+${recentCanon}
+
+Your job:
+1. Welcome the player back in one warm sentence.
+2. Briefly remind them of the core value in one sentence, using only the canon above.
+3. Ask one focused question (2–3 options) to continue building. Do not invent new facts.
+Keep it short and speakable.`,
+            metadata: { topic: "resume" },
+          })
+        );
+        startModeRef.current = "new";
+      } else {
+        // New game — name the game in English, then ask the core question.
+        const greetingInstructions = `${ENGLISH_ONLY_INSTRUCTION}
+
+You are the voice of the spoken improv worldbuilding game "Society" (one word: Society).
+
+Your first sentence MUST do all of this in English only:
+- Name the activity: say it is the "Society" worldbuilding game (or "Society" spoken worldbuilding game).
+- Say you are the player's Society co-creator for this session.
+
+Example shape (wording can vary slightly but keep every requirement): "Hi — I'm your Society co-creator; we're playing the Society worldbuilding game together."
+
+Immediately after that sentence, say THESE EXACT WORDS and nothing else:
+"What's the most important thing in this society? Everything else will follow from it."
+
+Stop speaking after that quoted sentence and wait for the player's answer.
+
+Rules:
+- Do NOT speak any language except English. Never Russian, Ukrainian, or German — English only for every word.
+- Do NOT ask about genres, types, or aesthetics (no futuristic, medieval, etc.).
+- Do NOT offer categories or examples of society types.
+- Do NOT paraphrase or reword the quoted question above — say it verbatim after your intro sentence.
+- If the player says they want to know the rules first, explain briefly (yes-and per turn, one concrete fact, Mirror → Extend → Prompt format), then ask the exact same quoted question again.`;
+        debugLog("RESPONSE_CREATE_SENT", { topic: "greeting", instructions: greetingInstructions });
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions: greetingInstructions,
+            metadata: { topic: "greeting" },
+          })
+        );
+      }
+      return;
+    }
 
     // Transcript deltas (audio transcript)
     if (evt.type === "response.output_audio_transcript.delta") {
@@ -690,17 +924,131 @@ export function VoiceConsoleV2({
       return;
     }
 
-    // User transcript deltas
-    if (evt.type === "input_audio_transcript.delta") {
+    // User transcript deltas — correct event names for gpt-realtime model
+    if (evt.type === "conversation.item.input_audio_transcription.delta") {
       const delta = evt?.delta ?? "";
       lastUserTranscriptRef.current += delta;
       return;
     }
 
-    if (evt.type === "input_audio_transcript.done") {
+    if (evt.type === "conversation.item.input_audio_transcription.completed") {
       const transcript = String(evt?.transcript ?? lastUserTranscriptRef.current ?? "").trim();
       lastUserTranscriptRef.current = "";
-      const genericPattern = /started a session|session started|participants have started|society places|society values|central value|core value|central core|shapes all aspects|all other aspects|emerge|game is called society|society is called/i;
+
+      if (transcript && isSpuriousUserTranscript(transcript)) {
+        addLog(
+          "sys",
+          "Ignored junk transcription (often another tab, meeting app, or a URL). Pause other audio and say your answer again."
+        );
+        return;
+      }
+
+      debugLog("USER_SPOKE", {
+        transcript,
+        onboardingPhase: onboardingPhaseRef.current,
+        coreValue: bibleRef.current?.canon?.coreValues?.[0] || "(none)",
+      });
+
+      // --- Onboarding intercept ---
+      // While in pre_core phase, the server is NOT auto-creating responses.
+      // We manually dispatch the right response based on what the player said.
+      if (onboardingPhaseRef.current === "pre_core" && transcript) {
+        const wantsRules = /\b(rules?|how (does|do) it work|explain|tell me|walk me through|what('s| is) (the game|it about)|how to play)\b/i.test(transcript);
+
+        if (wantsRules) {
+          // Player wants rules — explain them, then ask the core question again.
+          // Stay in pre_core phase so their NEXT response is also intercepted.
+          sendEvent(
+            mkResponseCreate({
+              output_modalities: ["audio"],
+              instructions: `${ENGLISH_ONLY_INSTRUCTION} The player wants to know how the game works. Explain in 2–3 short sentences: players trade yes-and statements building a fictional society one fact at a time; your turn is always Mirror (echo back) → Extend (add one concrete consequence) → Prompt (one question with 2–3 options). Then immediately ask EXACTLY this: "So — what's the most important thing in this society? Everything else will follow from it." STOP there and wait.`,
+              metadata: { topic: "rules_then_core" },
+            })
+          );
+        } else {
+          // Player answered the core question — save it to the bible immediately
+          // and kick off the first AI gameplay turn.
+          onboardingPhaseRef.current = "done";
+
+          const coreValue = normalizeCoreValueUtterance(transcript);
+          const coreLabel = extractCoreTopicPhrase(coreValue);
+
+          // Update the ref synchronously so sendSessionInstructions picks up
+          // the core value immediately (setState is async and won't update the
+          // ref until the next render cycle).
+          bibleRef.current = structuredClone(bibleRef.current);
+          bibleRef.current.lastUserUtterance = coreValue;
+          bibleRef.current.canon.coreValues[0] = coreValue;
+          setBible(bibleRef.current);
+
+          debugLog("CORE_VALUE_ACCEPTED", { coreValue, coreLabel });
+
+          // Update system prompt with the core value baked in, but keep
+          // create_response: false so the server doesn't fire a VAD auto-response
+          // before our explicit core_value_accepted response.create lands.
+          // Auto-responses are enabled in response.done after core_value_accepted completes.
+          sendSessionInstructions(false);
+
+          // Cancel any stray auto-response just in case.
+          sendEvent(mkResponseCancel());
+
+          const cvaInstructions = `${ENGLISH_ONLY_INSTRUCTION}
+
+CORE VALUE JUST ESTABLISHED: "${coreLabel}"
+
+This is the single most important thing in this society. Every word you say must be rooted in "${coreLabel}" specifically — not in general observations about "${coreLabel}" in the abstract.
+You MUST use the player's exact term "${coreLabel}" in Part 1 — never replace it with a synonym (e.g. if the term is vanity, do not say beauty, appearance, or looks).
+
+Respond in EXACTLY this three-part structure:
+
+PART 1 — Mirror (one sentence, max 12 words):
+Acknowledge "${coreLabel}" directly as the foundation of this society. Do NOT say "${coreLabel} is important" or "${coreLabel} is central" — that is generic. Instead say something like: "${coreLabel} — so in this place, that's the bedrock everything else is built on."
+
+PART 2 — Extend (1–2 sentences):
+Name ONE specific, concrete, surprising thing that happens in daily life BECAUSE "${coreLabel}" is the most important thing. Give it a name, a ritual, an object, a rule, a role. It must be a fact that could ONLY exist in a society where "${coreLabel}" is the foundation.
+WRONG: "${coreLabel} is deeply valued here."
+RIGHT: (example for "art") "Every citizen is assigned a color at birth — a pigment that becomes their medium, their identity, their legal name."
+
+PART 3 — Prompt (one question with 2–3 options):
+Ask ONE question with 2–3 choices that could ONLY make sense if "${coreLabel}" is the foundation. The options should force a real revealing choice about how this society works.
+
+Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt".`;
+          debugLog("RESPONSE_CREATE_SENT", { topic: "core_value_accepted", instructions: cvaInstructions });
+          sendEvent(
+            mkResponseCreate({
+              output_modalities: ["audio"],
+              instructions: cvaInstructions,
+              metadata: { topic: "core_value_accepted" },
+            })
+          );
+        }
+        return;
+      }
+
+      // --- Wrap-up detection ---
+      // If the player says something like "let's wrap up" during gameplay,
+      // trigger the same final-breakdown flow as pressing Stop.
+      const wrapUpPattern = /\b(wrap(ping)? up|let'?s (finish|end|stop|wrap)|that'?s (enough|all|it)|end (the game|the session|it here)|finish(ed)?|i'?m done|we'?re done|stop (the game|playing)|that'?s a wrap)\b/i;
+      if (
+        onboardingPhaseRef.current === "done" &&
+        transcript &&
+        bibleRef.current.turnCount > 0 &&
+        wrapUpPattern.test(transcript)
+      ) {
+        setStopping(true);
+        pendingFinalBreakdownRef.current = true;
+        sendEvent(
+          mkResponseCreate({
+            conversation: "none",
+            metadata: { topic: "recap" },
+            output_modalities: ["text"],
+            instructions: `Respond only in English. ${recapPrompt(bibleRef.current)}`,
+          })
+        );
+        return;
+      }
+
+      const genericPattern = /started a session|session started|participants have started|society places|society values|central value|core value|central core|shapes all aspects|all other aspects|emerge|game is called society|society is called|dive (straight )?in|let'?s (dive|start|go|begin)|what are the rules|how do(es)? it work|tell me the rules/i;
       const tooSoon = Date.now() - lastAssistantAtRef.current < 5000;
       if (
         transcript &&
@@ -708,14 +1056,36 @@ export function VoiceConsoleV2({
         !isLikelyEcho(transcript, lastAssistantTranscriptRef.current) &&
         !tooSoon
       ) {
+        const coreValue = normalizeCoreValueUtterance(transcript);
         setBible((b) => {
           const next = structuredClone(b);
-          next.lastUserUtterance = transcript;
+          next.lastUserUtterance = coreValue;
           if (!next.canon.coreValues[0]) {
-            next.canon.coreValues[0] = transcript;
+            next.canon.coreValues[0] = coreValue;
           }
           return next;
         });
+      }
+
+      // Safety net: if auto-responses are active (create_response: true) but the
+      // core value still isn't set after the player speaks, re-send a targeted
+      // response.create to prevent the server generating a generic reply.
+      if (
+        transcript &&
+        !tooSoon &&
+        !bibleRef.current.canon.coreValues[0] &&
+        !genericPattern.test(transcript) &&
+        !isLikelyEcho(transcript, lastAssistantTranscriptRef.current)
+      ) {
+        const coreValue = normalizeCoreValueUtterance(transcript);
+        const coreLabel = extractCoreTopicPhrase(coreValue);
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions: `${ENGLISH_ONLY_INSTRUCTION} The player has just named the most important thing in their society: "${coreLabel}". Treat this as the society's core value — it is now hard canon. Mirror it back warmly in one sentence. Then extend with one concrete, sensory consequence of that value in daily life (1–2 sentences). Then ask one focused follow-up question with 2–3 options to continue building the society. Keep it short and speakable.`,
+            metadata: { topic: "core_value_accepted" },
+          })
+        );
       }
       return;
     }
@@ -724,17 +1094,16 @@ export function VoiceConsoleV2({
       const transcript = evt?.transcript ?? liveTranscript;
       lastAssistantTranscriptRef.current = transcript;
       lastAssistantAtRef.current = Date.now();
-      aiSpeakingRef.current = false;
-      if (aiSpeechTimeoutRef.current) {
-        window.clearTimeout(aiSpeechTimeoutRef.current);
-      }
-      aiSpeechTimeoutRef.current = window.setTimeout(() => {
-        if (!pausedRef.current) {
-          setMicEnabled(true);
-        }
-      }, 700);
+      releaseMicAfterAssistant();
       setBible((b) => ({ ...b, lastAiUtterance: transcript }));
       setLiveTranscript("");
+
+      debugLog("AI_SPOKE", {
+        transcript,
+        topic: evt?.response?.metadata?.topic ?? "(auto-response)",
+        coreValue: bibleRef.current?.canon?.coreValues?.[0] || "(none)",
+        onboardingPhase: onboardingPhaseRef.current,
+      });
 
       // After the model speaks, we do an out-of-band JSON update to propose canon changes.
       // This avoids tool-calling interrupting speech.
@@ -744,8 +1113,16 @@ export function VoiceConsoleV2({
 
     // Final response object (can also carry function calls)
     if (evt.type === "response.done") {
+      // Safety net: transcript.done can occasionally be skipped.
+      releaseMicAfterAssistant();
       // If this was our recap or OOB update, it'll have metadata.topic.
       const topic = evt?.response?.metadata?.topic;
+      debugLog("RESPONSE_DONE", {
+        topic: topic ?? "(no topic)",
+        status: evt?.response?.status ?? "?",
+        onboardingPhase: onboardingPhaseRef.current,
+        coreValue: bibleRef.current?.canon?.coreValues?.[0] || "(none)",
+      });
 
       // Handle function calling outputs if present.
       const output = evt?.response?.output ?? [];
@@ -753,6 +1130,14 @@ export function VoiceConsoleV2({
         if (item?.type === "function_call") {
           await handleFunctionCall(item);
         }
+      }
+
+      // Enable auto-responses and push full gameplay instructions once the
+      // first "Society" turn completes. We keep create_response: false until
+      // this point so the server can't fire a stale VAD response before our
+      // explicit response.create lands.
+      if (topic === "core_value_accepted" || topic === "rules_then_core") {
+        sendSessionInstructions(true);
       }
 
       if (topic === "recap") {
@@ -796,21 +1181,13 @@ export function VoiceConsoleV2({
               conversation: "none",
               metadata: { topic: "final_breakdown" },
               output_modalities: ["text"],
-              instructions: finalBreakdownPrompt(bible),
+              instructions: `${ENGLISH_ONLY_INSTRUCTION}\n\n${finalBreakdownPrompt(bibleRef.current)}`,
             })
           );
         }
       }
 
-      if (topic === "bible_update") {
-        const text = extractTextFromResponse(evt);
-        const parsed = sanitizeUpdate(safeJsonParse<Partial<BibleUpdate>>(text));
-        if (parsed) {
-          applyBibleUpdate(parsed);
-        } else {
-          addLog("sys", `Could not parse bible_update JSON. Raw: ${text.slice(0, 500)}`);
-        }
-      }
+      // bible_update is now handled by /api/bible-update via requestOobBibleUpdate (direct fetch).
 
       if (topic === "final_breakdown") {
         const text = extractTextFromResponse(evt);
@@ -835,15 +1212,18 @@ export function VoiceConsoleV2({
             return;
           }
           const title = pickSessionTitle(bibleToSave, String(parsed?.core_values?.[0] ?? "").trim(), String(parsed?.title ?? "").trim());
+          const existing = await getGame(id);
           await saveGame({
             id,
-            createdAt: Date.now(),
+            createdAt: existing?.createdAt ?? Date.now(),
             title,
+            titleIsCustom: existing?.titleIsCustom ?? false,
             finalRecordText: pretty,
             summary: summaryRef.current,
             bible: bibleToSave,
             images: imagesToSave,
           });
+          window.dispatchEvent(new Event("society-sessions-updated"));
           setHistory(await listGames());
           setLastSaveAt(new Date().toLocaleString());
           setLastSaveTitle(title);
@@ -856,57 +1236,7 @@ export function VoiceConsoleV2({
         window.dispatchEvent(new Event("society-reset"));
       }
 
-      if (topic === "image_scene") {
-        const text = extractTextFromResponse(evt);
-        const parsed = safeJsonParse<any>(text);
-        const title = String(parsed?.title ?? `Turn ${bible.turnCount}: scene`);
-        const caption = String(parsed?.caption ?? "");
-        const seedFacts = Array.isArray(parsed?.seedFacts) ? parsed.seedFacts.map(String).slice(0, 8) : [];
-        const styleGuide = String(parsed?.styleGuide ?? "");
-        const prompt = String(parsed?.prompt ?? "");
-        const negative = String(
-          parsed?.negativePrompt ?? "text, logos, watermark, explicit nudity, explicit sexual content, gore, graphic violence"
-        );
-
-        if (!prompt) {
-          addLog("sys", `Image scene parse failed: ${text.slice(0, 240)}`);
-          setImageBusy(false);
-          return;
-        }
-
-        if (!imageStyleGuide && styleGuide) setImageStyleGuide(styleGuide);
-
-        const fullPrompt = `${styleGuide ? `STYLE GUIDE (keep consistent): ${styleGuide}\n\n` : ""}${
-          seedFacts.length ? `CANON SEEDS (must reflect):\n- ${seedFacts.join("\n- ")}\n\n` : ""
-        }${prompt}\n\nAvoid: ${negative}`;
-        try {
-          const requestSessionId = sessionIdRef.current;
-          addLog("sys", "Generating image…");
-          const r = await fetch("/api/image-generate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              prompt: fullPrompt,
-              size: IMAGE_SIZE,
-            }),
-          });
-          if (!r.ok) {
-            addLog("sys", `Image error: ${await r.text()}`);
-            setImageBusy(false);
-            return;
-          }
-          const data = (await r.json()) as { b64: string };
-          if (sessionIdRef.current !== requestSessionId) {
-            addLog("sys", "Discarded image for previous session.");
-            return;
-          }
-          setImages((prev) => [
-            ...prev,
-            { b64: data.b64, title, caption, seedFacts, promptUsed: fullPrompt.slice(0, 4000), at: new Date().toLocaleString() },
-          ]);        } finally {
-          setImageBusy(false);
-        }
-      }
+      // image_scene is now handled by /api/image-scene via onGenerateImage (direct fetch).
 
       return;
     }
@@ -952,59 +1282,16 @@ export function VoiceConsoleV2({
     }
 
     if (name === "society_propose_image_scene") {
-      // Generate an image immediately from the proposed prompt.
-      const title = String(args?.title ?? `Turn ${bible.turnCount}: scene`);
-      const caption = String(args?.caption ?? "");
-      const seedFacts = Array.isArray(args?.seedFacts) ? args.seedFacts.map(String).slice(0, 8) : [];
-      const styleGuide = String(args?.styleGuide ?? "");
-      const prompt = String(args?.prompt ?? "");
-      const negative = String(
-        args?.negativePrompt ?? "text, logos, watermark, explicit nudity, explicit sexual content, gore, graphic violence"
-      );
-
-      if (!imageStyleGuide && styleGuide) setImageStyleGuide(styleGuide);
-
-      const fullPrompt = `${styleGuide ? `STYLE GUIDE (keep consistent): ${styleGuide}\n\n` : ""}${
-        seedFacts.length ? `CANON SEEDS (must reflect):\n- ${seedFacts.join("\n- ")}\n\n` : ""
-      }${prompt}\n\nAvoid: ${negative}`;
-
-      if (prompt) {
-        try {
-          const requestSessionId = sessionIdRef.current;
-          setImageBusy(true);
-          addLog("sys", "Generating image…");
-          const r = await fetch("/api/image-generate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              prompt: fullPrompt,
-              size: IMAGE_SIZE,
-            }),
-          });
-          if (r.ok) {
-            const data = (await r.json()) as { b64: string };
-            if (sessionIdRef.current !== requestSessionId) {
-              addLog("sys", "Discarded image for previous session.");
-              return;
-            }
-            setImages((prev) => [
-              ...prev,
-              { b64: data.b64, title, caption, seedFacts, promptUsed: fullPrompt.slice(0, 4000), at: new Date().toLocaleString() },
-            ]);
-          window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: `Image: ${title}` } }));
-            window.dispatchEvent(new CustomEvent("society-activity", { detail: { message: `Image: ${title}` } }));
-          } else {
-            addLog("sys", `Image error: ${await r.text()}`);
-          }
-        } finally {
-          setImageBusy(false);
-        }
-      }
-
+      // Route through /api/image-scene so images are saved to disk.
+      // The model's proposed prompt/styleGuide are ignored in favour of a
+      // fresh canon-consistent proposal from the server — this avoids double
+      // prompting and keeps the style consistent.
       sendEvent({
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id, output: JSON.stringify({ ok: true }) },
       });
+      // Fire-and-forget via the shared helper so it also updates state/saves.
+      onGenerateImage().catch(() => {});
       return;
     }
 
@@ -1015,15 +1302,34 @@ export function VoiceConsoleV2({
   }
 
   async function requestOobBibleUpdate(lastTranscript: string) {
-    const prompt = oobUpdatePrompt(bible, lastTranscript);
-    sendEvent(
-      mkResponseCreate({
-        conversation: "none",
-        metadata: { topic: "bible_update" },
-        output_modalities: ["text"],
-        instructions: prompt,
-      })
-    );
+    // Don't update the bible until the player has established the core value.
+    // Before that, the AI is only asking questions — there's no canon to extract.
+    if (!bibleRef.current.canon.coreValues[0]) return;
+    if (!lastTranscript?.trim()) return;
+
+    // Use a direct server-side fetch instead of the realtime data-channel
+    // "conversation: none" mechanism, which is unreliable on this endpoint.
+    const requestSessionId = sessionIdRef.current;
+    try {
+      const r = await fetch("/api/bible-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bible: bibleRef.current, lastAiTranscript: lastTranscript }),
+      });
+      if (!r.ok) return;
+      const data = await r.json().catch(() => null);
+      if (!data) return;
+      if (sessionIdRef.current !== requestSessionId) return; // session changed
+      const update: BibleUpdate = {
+        addCanon: Array.isArray(data.addCanon) ? data.addCanon.map(String) : [],
+        addOpenThreads: Array.isArray(data.addOpenThreads) ? data.addOpenThreads.map(String) : [],
+        contradictionsFound: Array.isArray(data.contradictionsFound) ? data.contradictionsFound.map(String) : [],
+        reconciliationOptions: Array.isArray(data.reconciliationOptions) ? data.reconciliationOptions.map(String) : [],
+      };
+      applyBibleUpdate(update);
+    } catch {
+      // Fail silently — bible updates are best-effort
+    }
   }
 
   function applyBibleUpdate(update: BibleUpdate) {
@@ -1040,12 +1346,13 @@ export function VoiceConsoleV2({
   // --- UI actions -------------------------------------------------------------
 
   const onRecap = () => {
+    const activeBible = bibleRef.current;
     sendEvent(
       mkResponseCreate({
         conversation: "none",
         metadata: { topic: "recap" },
         output_modalities: ["text"],
-        instructions: `Respond only in English. ${recapPrompt(bible)}`,
+        instructions: `Respond only in English. ${recapPrompt(activeBible)}`,
       })
     );
   };
@@ -1083,25 +1390,75 @@ export function VoiceConsoleV2({
   };
 
   const onGenerateImage = async () => {
-    if (!connected || imageBusy) return;
+    // Images are generated via HTTP (/api/image-scene), not the realtime data channel.
+    // Requiring dc.open blocked generation whenever the channel was flaky or still opening.
+    if (imageBusy) return;
+    if (!sessionIdRef.current) {
+      addLog("sys", "Image skipped: no session id yet.");
+      return;
+    }
     setImageBusy(true);
-    // Ask the model (text-only, out-of-band) for a canon-consistent image prompt, then generate.
-    sendEvent(
-      mkResponseCreate({
-        conversation: "none",
-        metadata: { topic: "image_scene" },
-        output_modalities: ["text"],
-        instructions: imageSceneProposalPrompt(bible, imageStyleGuide),
-      })
-    );
+    const requestSessionId = sessionIdRef.current;
+    addLog("sys", "Generating image scene…");
+    try {
+      const r = await fetch("/api/image-scene", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bible: bibleRef.current,
+          styleGuide: imageStyleGuide,
+          sessionId: requestSessionId,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || (!data?.b64 && !data?.imagePath)) {
+        addLog("sys", `Image scene error: ${String(data?.error ?? r.status)}`);
+        return;
+      }
+      if (sessionIdRef.current !== requestSessionId) {
+        addLog("sys", "Discarded image for previous session.");
+        return;
+      }
+      if (!imageStyleGuide && data.styleGuide) setImageStyleGuide(data.styleGuide);
+      setImages((prev) => [
+        ...prev,
+        {
+          b64: data.b64 ? String(data.b64) : undefined,
+          imagePath: data.imagePath ? String(data.imagePath) : undefined,
+          title: String(data.title ?? "Society scene"),
+          caption: String(data.caption ?? ""),
+          seedFacts: Array.isArray(data.seedFacts) ? data.seedFacts.map(String) : [],
+          promptUsed: String(data.promptUsed ?? "").slice(0, 4000),
+          at: new Date().toLocaleString(),
+        },
+      ]);
+      window.dispatchEvent(
+        new CustomEvent("society-activity", { detail: { message: `Image: ${data.title ?? "scene"}` } })
+      );
+    } finally {
+      setImageBusy(false);
+    }
   };
 
+  // Fire the very first image as soon as the core value is established.
+  // imageBusy is in deps so that if the first attempt was skipped (busy/not-ready),
+  // the effect re-runs when imageBusy clears and retries automatically.
+  useEffect(() => {
+    if (!autoImages) return;
+    if (!connected) return;
+    if (imageBusy) return;
+    if (!bible.canon.coreValues[0]) return;
+    if (images.length > 0) return;
+    onGenerateImage();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bible.canon.coreValues[0], connected, imageBusy, autoImages]);
+
+  // Subsequent auto-images every N turns during gameplay.
   useEffect(() => {
     if (!autoImages) return;
     if (!connected) return;
     if (imageBusy) return;
     if (bible.turnCount <= 0) return;
-    if (bible.changelog.length < 3) return;
     if (autoEveryTurns <= 0) return;
     if (bible.turnCount % autoEveryTurns !== 0) return;
     if (lastAutoImageTurnRef.current === bible.turnCount) return;
@@ -1116,12 +1473,14 @@ export function VoiceConsoleV2({
 
   useEffect(() => {
     const handler = () => {
-      if (connected || connecting) return;
-      start();
+      if (connected) return;
+      // Always reset a stuck/failed connect attempt (e.g. mic prompt ignored left `connecting` true).
+      stop();
+      void start();
     };
     window.addEventListener("society-start", handler);
     return () => window.removeEventListener("society-start", handler);
-  }, [connected, connecting]);
+  }, [connected]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -1133,7 +1492,7 @@ export function VoiceConsoleV2({
           sendEvent(
             mkResponseCreate({
               output_modalities: ["audio"],
-              instructions: recapNarrationPrompt(bibleRef.current, captions),
+              instructions: `${ENGLISH_ONLY_INSTRUCTION} ${recapNarrationPrompt(bibleRef.current, captions)}`,
               metadata: { topic: "recap_spoken" },
             })
           );
@@ -1152,11 +1511,27 @@ export function VoiceConsoleV2({
       startModeRef.current = "continue";
       if (connected) {
         sendSessionInstructions();
+        const resumeBible2 = bibleRef.current;
+        const coreValue2 = resumeBible2.canon.coreValues?.[0] || resumeBible2.lastUserUtterance || "";
+        const recentCanon2 = resumeBible2.changelog
+          .slice()
+          .sort((a: any, b: any) => a.turn - b.turn)
+          .slice(-8)
+          .map((c: any) => `- ${c.entry}`)
+          .join("\n") || "- (none yet)";
         sendEvent(
           mkResponseCreate({
             output_modalities: ["audio"],
-            instructions:
-              "Warmly welcome the player back and continue seamlessly from the existing canon summary above. In one short sentence, remind them of the core value of this society. Then prompt the next addition with one short, open question and 2–3 options. Do not invent new facts. Keep it concise.",
+            instructions: `${ENGLISH_ONLY_INSTRUCTION}
+
+You are resuming an existing Society session. Treat every item below as hard canon. Do NOT invent, add, or contradict anything not listed here.
+
+CORE VALUE: ${coreValue2 || "(not yet set)"}
+
+ESTABLISHED CANON:
+${recentCanon2}
+
+Welcome the player back in one short sentence. Remind them of the core value in one sentence. Then ask one short open question to continue — 2–3 options. Do not invent new facts. Keep it concise.`,
             metadata: { topic: "resume" },
           })
         );

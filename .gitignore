@@ -18,4 +18,9 @@ node_modules/
 .DS_Store
 .vscode/
 
+# User-generated game data (sessions + images + debug logs)
+data/sessions/
+data/logs/
+public/game-images/
+
 

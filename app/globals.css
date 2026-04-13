@@ -494,9 +494,13 @@ hr {
   flex-wrap: wrap;
 }
 
+@keyframes pulseDot {
+  0% { transform: scale(0.98); opacity: 0.4; }
   50% { transform: scale(1.03); opacity: 0.85; }
   100% { transform: scale(0.98); opacity: 0.4; }
-\.aiWave {
+}
+
+.aiWave {
   display: block;
   margin: 0;
   width: 320px;
@@ -510,4 +514,14 @@ hr {
 .saveStatus {
   font-size: 12px;
   color: #5a130c;
+}
+
+.logoButton {
+  border: none;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.logoButton:active {
+  transform: translate(1px, 1px);
 }

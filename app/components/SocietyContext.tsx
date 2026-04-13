@@ -5,7 +5,7 @@ import type { SocietyBible } from "@/lib/societyBible";
 import { createEmptyBible } from "@/lib/societyBible";
 import type { GeneratedImage } from "./ImageStrip";
 import type { SavedGame } from "@/lib/gameHistory";
-import { getGame, listGames } from "@/lib/gameHistory";
+import { getGame, listGames, normalizeSavedGame, saveGame } from "@/lib/gameHistory";
 
 type SocietyState = {
   bible: SocietyBible;
@@ -39,15 +39,24 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const lastId = window.localStorage.getItem("society:lastSessionId");
+    const skipAutoLoad = window.localStorage.getItem("society:skipAutoLoad") === "1";
+    if (skipAutoLoad) {
+      window.localStorage.removeItem("society:skipAutoLoad");
+      return;
+    }
     if (!lastId || sessionId) return;
     getGame(lastId)
       .then((g) => {
         if (!g) return;
-        setBible(g.bible);
-        setImages(g.images);
-        setFinalRecord(g.finalRecordText ?? "");
-        setSummary(g.summary ?? "");
-        setSessionId(g.id);
+        const normalized = normalizeSavedGame(g);
+        if (normalized.changed) {
+          saveGame(normalized.game).catch(() => {});
+        }
+        setBible(normalized.game.bible);
+        setImages(normalized.game.images);
+        setFinalRecord(normalized.game.finalRecordText ?? "");
+        setSummary(normalized.game.summary ?? "");
+        setSessionId(normalized.game.id);
       })
       .catch(() => {});
   }, [sessionId, setBible, setImages, setFinalRecord, setSummary, setSessionId]);

@@ -27,6 +27,12 @@ export function SessionPickerV2({
     return () => window.removeEventListener("society-sessions-updated", handler);
   }, [setHistory]);
 
+  // Refetch whenever the Saved menu opens so the list isn’t stale (e.g. after restarts).
+  useEffect(() => {
+    if (!showSaved) return;
+    listGames().then(setHistory).catch(() => {});
+  }, [showSaved, setHistory]);
+
   const onSelect = async (id: string) => {
     setSelectedId(id);
     if (!id) return;

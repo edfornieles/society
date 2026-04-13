@@ -13,6 +13,10 @@ export function mkConversationItemCreate(payload: any): RealtimeClientEvent {
   return { type: "conversation.item.create", item: payload };
 }
 
+export function mkResponseCancel(): RealtimeClientEvent {
+  return { type: "response.cancel" };
+}
+
 export function mkFunctionCallOutput(call_id: string, outputObj: any): RealtimeClientEvent {
   return {
     type: "conversation.item.create",

@@ -94,7 +94,7 @@ export function ImageStripPanelV2() {
   const current = images[activeIndex] ?? images[images.length - 1];
   const canPrev = activeIndex > 0;
   const canNext = activeIndex < images.length - 1;
-  const coreChoice = String(bible.canon.coreValues?.[0] ?? bible.lastUserUtterance ?? bible.changelog?.[0]?.entry ?? "").trim();
+  const coreChoice = String(bible.canon.coreValues?.[0] ?? "").trim();
   const showPrompt = introStarted && !coreChoice;
   const showCoreChoiceUntilImage = introStarted && coreChoice && images.length === 0;
   const rawCaption = current?.caption?.trim() ?? "";
@@ -110,7 +110,11 @@ export function ImageStripPanelV2() {
       {current ? (
         <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img alt={current.title} src={`data:image/png;base64,${current.b64}`} className="stageImageFull" />
+          <img
+            alt={current.title}
+            src={current.imagePath ?? (current.b64 ? `data:image/png;base64,${current.b64}` : "")}
+            className="stageImageFull"
+          />
           <div className="floatingCaption">
             <div className="floatingTitle integratedTitle floatingTitleRow">
               <span>{current.title}</span>
@@ -136,7 +140,7 @@ export function ImageStripPanelV2() {
             {showPrompt ? (
               <p>WHAT IS THE MOST IMPORTANT THING IN YOUR SOCIETY?</p>
             ) : showCoreChoiceUntilImage ? (
-              <p className="coreChoiceText">{`You chose: ${coreChoice}`}</p>
+              <p className="coreChoiceText">{`THE MOST IMPORTANT THING IN THIS SOCIETY IS ${coreChoice.toUpperCase()}`}</p>
             ) : fallbackDescription ? (
               <p>{fallbackDescription}</p>
             ) : (
@@ -174,7 +178,7 @@ export function ImageStripPanelV2() {
             ) : (
               <p>
                 {coreChoice
-                  ? `You chose: ${coreChoice}`
+                  ? `THE MOST IMPORTANT THING IN THIS SOCIETY IS ${coreChoice.toUpperCase()}`
                   : "WHAT IS THE MOST IMPORTANT THING IN YOUR SOCIETY?"}
               </p>
             )}

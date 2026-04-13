@@ -1,5 +1,8 @@
 export type GeneratedImage = {
-  b64: string;
+  /** Base64 PNG — kept in memory for immediate display. */
+  b64?: string;
+  /** Server-relative URL to the saved PNG file, e.g. /game-images/{sessionId}/{ts}.png */
+  imagePath?: string;
   title: string;
   at: string;
   caption?: string;
@@ -28,7 +31,7 @@ export function ImageStrip({ images }: { images: GeneratedImage[] }) {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 alt={img.title}
-                src={`data:image/png;base64,${img.b64}`}
+                src={img.imagePath ?? (img.b64 ? `data:image/png;base64,${img.b64}` : "")}
                 style={{ width: "100%", borderRadius: 10, border: "1px solid #e5e7eb" }}
               />
               {img.caption ? <small className="muted">{img.caption}</small> : null}

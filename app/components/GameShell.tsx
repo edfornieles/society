@@ -7,6 +7,7 @@ import { ImageStripV2 } from "./ImageStripV2";
 import { RulesPanel } from "./RulesPanel";
 import { useSociety } from "./SocietyContext";
 import { createEmptyBible } from "@/lib/societyBible";
+import type { Playfulness } from "@/lib/prompts";
 
 export function GameShell() {
   const { setBible, setImages, setFinalRecord, setSummary, setSessionId } = useSociety();
@@ -19,8 +20,8 @@ export function GameShell() {
   const [hasLoadedSession, setHasLoadedSession] = useState(false);
   const [resumeMode, setResumeMode] = useState<"new" | "continue" | "recap">("new");
 
-  const [voice, setVoice] = useState("marin");
-  const [playfulness, setPlayfulness] = useState(2);
+  const [voice, setVoice] = useState<"marin" | "alloy" | "verse" | "aria" | "ember">("marin");
+  const [playfulness, setPlayfulness] = useState<Playfulness>(2);
   const [autoImages, setAutoImages] = useState(true);
   const [autoEveryTurns, setAutoEveryTurns] = useState(1);
 
@@ -61,6 +62,8 @@ export function GameShell() {
   const progressStep = Math.min(100, Math.max(0, Math.round(imageProgress / 10) * 10));
 
   const onNewGame = () => {
+    window.localStorage.removeItem("society:lastSessionId");
+    window.localStorage.setItem("society:skipAutoLoad", "1");
     setShowSaved(false);
     setHasLoadedSession(false);
     setResumeMode("new");
@@ -75,10 +78,10 @@ export function GameShell() {
     <main className="gameRoot">
       <div className="gameLayout">
         <nav className="topNav">
-          <div className="logoPixel">
+          <button className="logoPixel logoButton" onClick={onNewGame} type="button" aria-label="New game">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/society_logo_upper_corner.png" alt="Society" className="logoImage" />
-          </div>
+          </button>
           <div className="hudNav">
             <button onClick={onNewGame}>New Game</button>
             <div className="savedMenu">

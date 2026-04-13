@@ -8,20 +8,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
   }
 
-  // Minimal session config per Realtime WebRTC unified interface examples:
-  // /v1/realtime/calls expects multipart form with "sdp" and "session".
+  const url = new URL(req.url);
+  const voice = url.searchParams.get("voice") ?? "marin";
+
+  // language=en for Whisper. Keep transcription.prompt to short keywords only — long
+  // sentences are often hallucinated into the user transcript as if spoken.
   const sessionConfig = {
     type: "realtime",
     model: "gpt-realtime",
-    // Choose a default voice here; client can override by passing ?voice= in the request.
-    audio: { output: { voice: "marin" } },
+    audio: {
+      output: { voice },
+      input: {
+        noise_reduction: { type: "near_field" },
+        transcription: {
+          model: "whisper-1",
+          language: "en",
+          // Short keyword-style hint only (Whisper-1). Long instructions get echoed into transcripts.
+          prompt: "English, Society game, core value, worldbuilding, canon.",
+        },
+      },
+    },
   };
-
-  const url = new URL(req.url);
-  const voice = url.searchParams.get("voice");
-  if (voice) {
-    (sessionConfig.audio.output as any).voice = voice;
-  }
 
   const fd = new FormData();
   fd.set("sdp", sdp);

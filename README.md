@@ -7,6 +7,92 @@ A real-time spoken improv worldbuilding game **Society**:
 - Guardrails: short turn format, canon tracking, recap, undo, image scene proposals
 - Optional **image generation** with `gpt-image-1`
 
+---
+
+## Game flow
+
+### Starting a new game
+
+1. Press **Start** (or "Press Start to begin" on the welcome screen).
+2. The AI greets the player and asks:
+   > *"What's the most important thing in this society? Everything else will follow from it."*
+   - **1a. Player asks for rules first** → the AI gives a brief explanation (yes-and per turn, one concrete fact, Mirror → Extend → Prompt format) and then asks the same question.
+   - **1b. Player answers directly** → whatever they say becomes the society's core value and the game begins immediately.
+3. Once the core value is set:
+   - The session **auto-saves**, using the core value as the session title (e.g. *"Honor"*, *"Surveillance"*, *"Art"*).
+   - The display text updates to *"THE MOST IMPORTANT THING IN THIS SOCIETY IS [their answer]"*.
+   - The **first scene image begins generating** in the background.
+
+### During gameplay
+
+Each turn follows a rhythm:
+
+- **Player speaks** — one yes-and statement: a fact, a consequence, a tiny vignette.
+- **AI responds** — always: Mirror (echoes back in one sentence) → Extend (adds one concrete consequence in daily life) → Prompt (asks one question with 2–3 options to steer the next turn).
+- The **Society Bible** (canon) updates silently after each AI turn, tracking: core values, institutions, status markers, daily life, open threads, and contradictions.
+- A new **scene image auto-generates** every few turns (configurable in Settings).
+- The **session autosaves** periodically in the background.
+
+The AI actively rotates across the society's domains over a long session — values, kinship, law, economy, architecture, art, foreign relations, and more — so the world grows wide rather than deep in one area.
+
+### Ending a session
+
+- Press **Stop** at any time. The session saves and the welcome screen returns.
+- Alternatively, say *"let's wrap up"* or similar — the AI will deliver a final vignette and a recap before you stop.
+- Sessions are stored **as files on disk** (see [Where sessions are saved](#where-sessions-are-saved)) and persist across page reloads.
+
+### Pausing
+
+- Press **Pause** to mute your mic without ending the session. The AI will not respond while paused.
+- Press **Resume** (or **Pause** again) to continue.
+
+---
+
+## Loading a saved game
+
+1. Click **Saved** in the top nav. A list of past sessions appears, each named after its core value.
+2. Click a session to load it — the Society Bible, images, and summary are restored.
+3. A prompt appears asking whether to start with a **Recap** (the AI narrates what was built, with a slideshow of the session's images) or to **Continue** directly from where you left off.
+4. Press **Play** (or **Start**) to reconnect. The AI welcomes you back and picks up from the existing canon.
+
+---
+
+## Starting a new game mid-session
+
+- Click **New Game** in the top nav, or click the **Society logo** in the top-left corner.
+- This clears the current session from the canvas (it stays saved) and returns to the welcome screen ready for a fresh start.
+
+---
+
+## Settings (accessible any time via the Settings button)
+
+| Setting | Description |
+|---|---|
+| Voice | Choose the AI's voice (Marin, Alloy, Verse, Aria, Ember) |
+| Playfulness | Dial the AI's tone from dry/serious (0) to playful/creative (3) |
+| Auto images | Toggle automatic image generation on/off |
+| Images every N turns | How often a new scene image generates (default: every turn) |
+| Event log | Shows raw realtime events — useful for debugging |
+| Delete session | Permanently removes the current session and its images from disk |
+
+> **Note:** Voice must be chosen before pressing Start — it cannot be changed once a session is live.
+
+---
+
+## Where sessions are saved
+
+Sessions are stored as files on the server, not in the browser:
+
+| Path | Contents |
+|---|---|
+| `data/sessions/{id}.json` | Full session record: bible, canon, open threads, image metadata |
+| `data/sessions/{id}.md` | Human-readable markdown transcript of the session (auto-generated on every save) |
+| `public/game-images/{id}/{timestamp}.png` | Scene images generated during the session |
+
+Both `data/sessions/` and `public/game-images/` are git-ignored. When deploying online, replace the file-based `app/api/sessions` routes with database calls.
+
+---
+
 ## 1) Setup
 
 ```bash
@@ -17,7 +103,7 @@ npm run dev   # runs on http://127.0.0.1:3001
 
 Open <http://127.0.0.1:3001>
 
-## 2) What’s included
+## 2) What's included
 
 - `/app` UI:
   - Full-screen welcome scene with centered logo + intro prompt
@@ -32,18 +118,27 @@ Open <http://127.0.0.1:3001>
   - Creates a Realtime WebRTC call using `POST https://api.openai.com/v1/realtime/calls`
   - Sends back the SDP answer so the browser can complete the peer connection
 
-- `/app/api/image-generate`:
-  - Generates a scene image with `gpt-image-1` and returns base64
+- `/app/api/image-scene`:
+  - Uses `gpt-4o-mini` to generate a canon-consistent scene proposal
+  - Generates the image with `gpt-image-1`
+  - Saves PNG to `public/game-images/{sessionId}/{timestamp}.png`
+
+- `/app/api/bible-update`:
+  - Out-of-band canon extraction after each AI turn using `gpt-4o-mini`
+
+- `/app/api/sessions` and `/app/api/sessions/[id]`:
+  - File-based session persistence (read/write/delete JSON + markdown files)
+
 - `RULES.md`:
   - Always-on rules for players and the AI; rendered in the in-app Rules panel
 
 ## 3) Important notes
 
-- The model voice must be chosen before the first audio response (can’t change afterwards).
+- The model voice must be chosen before the first audio response (can't change afterwards).
 - Realtime sessions are capped at ~60 minutes; you can reconnect and carry the Bible forward.
 - Echo: keep headphones on if possible (prevents the model hearing itself).
-- Sessions autosave (bible + images + summary) and are restored when reloading.
-- Sessions are stored **locally in your browser** using **IndexedDB** (`DB: society`, store: `games`).
+- Sessions autosave (bible + images + summary) after every meaningful change.
+- Language: the AI always responds in English. The transcription model is set to `language: "en"`.
 
 ## 4) Welcome background
 
@@ -54,15 +149,12 @@ Open <http://127.0.0.1:3001>
 
 Quick manual check:
 
-1. Start a session, say a core value (e.g., “sports cars”), and generate at least one image.
+1. Start a session, say a core value (e.g., "art"), and generate at least one image.
 2. Press Stop → confirm you return to the welcome screen.
 3. Click **Saved** and confirm the session appears with the core value as the title.
 4. Load it → images and summary should be restored.
-
-If sessions aren’t showing, verify IndexedDB has entries:
-
-- Chrome: DevTools → Application → IndexedDB → `society` → `games`
-- Safari: Develop → Show Web Inspector → Storage → IndexedDB
+5. Check `data/sessions/` — you should see `{id}.json` and `{id}.md` files.
+6. Check `public/game-images/{id}/` — you should see PNG files.
 
 ## 6) Docs referenced
 

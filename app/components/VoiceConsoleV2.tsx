@@ -19,7 +19,7 @@ import { safeJsonParse, sanitizeUpdate } from "@/lib/guardrails";
 import { isSpuriousUserTranscript } from "@/lib/transcriptGuards";
 import { normalizeCoreValueUtterance, extractCoreTopicPhrase } from "@/lib/coreValueNormalize";
 import { mkSessionUpdate, mkResponseCreate, mkResponseCancel } from "@/lib/realtimeEvents";
-import type { GeneratedImage } from "./ImageStrip";
+import type { GeneratedImage } from "@/lib/generatedImage";
 
 type LogLine = { at: string; dir: "in" | "out" | "sys"; text: string };
 
@@ -35,7 +35,7 @@ const VOICES = ["marin", "alloy", "verse", "aria", "ember"] as const;
 const DEFAULT_64BIT_STYLE_GUIDE =
   "64-bit retro pixel art (late PS1/N64-era). Crisp pixels with richer detail, broader palette, subtle dithering, strong silhouettes, readable shapes. Cozy cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
 
-const IMAGE_SIZE = "1536x1024";
+const IMAGE_SIZE = "1024x1024";
 const USER_TURN_SILENCE_MS = 2200;
 const USER_TURN_PREFIX_PADDING_MS = 500;
 const ENGLISH_ONLY_INSTRUCTION =
@@ -51,6 +51,17 @@ function isLikelyEcho(userText: string, assistantText: string) {
   if (!u || !a) return false;
   if (u.length < 12) return false;
   return a.includes(u) || u.includes(a);
+}
+
+function isIgnorableRealtimeError(err: any): boolean {
+  const code = String(err?.code ?? err?.error?.code ?? "").toLowerCase();
+  const message = String(err?.message ?? err?.error?.message ?? "").toLowerCase();
+  // Harmless races we intentionally trigger to suppress stray model output.
+  if (code.includes("already_cancelled") || code.includes("not_found")) return true;
+  if (message.includes("no active response")) return true;
+  if (message.includes("cannot cancel") && message.includes("response")) return true;
+  if (message.includes("response") && message.includes("already") && message.includes("done")) return true;
+  return false;
 }
 
 function formatSessionTitle(coreChoice: string) {
@@ -419,21 +430,27 @@ export function VoiceConsoleV2({
     setPaused(false);
     window.dispatchEvent(new Event("society-started"));
     try {
-      // When explicitly starting a new game, reset stale refs immediately so we
-      // never accidentally fall into "continue" mode due to ref/state lag.
+      // If the user already has progress (core value, turns, images, or canon) but the UI
+      // mode is still "new", treat the next Start as CONTINUE — must run BEFORE we wipe refs.
+      // Otherwise Stop → Start would clear sessionId/bible and feel like the game "disappeared".
+      if (startModeRef.current === "new") {
+        const b = bibleRef.current;
+        const hasProgress =
+          !!sessionIdRef.current &&
+          (Boolean(b.canon.coreValues?.[0]) ||
+            b.turnCount > 0 ||
+            (b.changelog?.length ?? 0) > 0 ||
+            imagesRef.current.length > 0);
+        if (hasProgress) {
+          startModeRef.current = "continue";
+        }
+      }
+
+      // When explicitly starting a brand-new game, reset stale refs.
       if (startModeRef.current === "new") {
         sessionIdRef.current = "";
         bibleRef.current = createEmptyBible();
         imagesRef.current = [];
-      }
-
-      // Only auto-switch to continue if there is an explicit session ID already loaded.
-      if (
-        startModeRef.current === "new" &&
-        sessionIdRef.current &&
-        (imagesRef.current.length > 0 || bibleRef.current.turnCount > 0)
-      ) {
-        startModeRef.current = "continue";
       }
       if (startModeRef.current === "continue" && !sessionIdRef.current) {
         setConnecting(false);
@@ -676,6 +693,7 @@ export function VoiceConsoleV2({
       localStreamRef.current = null;
     }
     addLog("sys", "Stopped.");
+    void autosave();
   }
 
   const autosave = async () => {
@@ -790,7 +808,12 @@ export function VoiceConsoleV2({
     if (evt.type === "error") {
       // If streaming fails mid-response, don't leave mic muted.
       releaseMicAfterAssistant();
-      addLog("sys", `Server error: ${JSON.stringify(evt?.error ?? evt)}`);
+      const err = evt?.error ?? evt;
+      if (isIgnorableRealtimeError(err)) {
+        addLog("sys", "Ignored benign realtime race error.");
+        return;
+      }
+      addLog("sys", `Server error: ${JSON.stringify(err)}`);
       return;
     }
 
@@ -982,6 +1005,9 @@ Rules:
           setBible(bibleRef.current);
 
           debugLog("CORE_VALUE_ACCEPTED", { coreValue, coreLabel });
+          // Persist immediately so a refresh/crash right after first answer
+          // still preserves the core value/session identity.
+          void autosave();
 
           // Update system prompt with the core value baked in, but keep
           // create_response: false so the server doesn't fire a VAD auto-response
@@ -1232,8 +1258,9 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
           // ignore persistence errors (private browsing, storage quota, etc.)
         }
 
+        // Stop voice connection but keep the current session loaded so pressing
+        // Start/Play without refreshing continues from the same world state.
         stop();
-        window.dispatchEvent(new Event("society-reset"));
       }
 
       // image_scene is now handled by /api/image-scene via onGenerateImage (direct fetch).
@@ -1440,18 +1467,23 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
     }
   };
 
-  // Fire the very first image as soon as the core value is established.
-  // imageBusy is in deps so that if the first attempt was skipped (busy/not-ready),
-  // the effect re-runs when imageBusy clears and retries automatically.
+  // Fire the very first image only after the first gameplay turn is grounded.
+  // Waiting for AI/canon evidence avoids generic "core value setup" scenes.
+  // imageBusy is in deps so skipped attempts retry automatically.
   useEffect(() => {
     if (!autoImages) return;
     if (!connected) return;
     if (imageBusy) return;
     if (!bible.canon.coreValues[0]) return;
     if (images.length > 0) return;
+    const hasAnchoredGameplay =
+      Boolean(bible.lastAiUtterance?.trim()) ||
+      bible.turnCount > 0 ||
+      bible.changelog.length > 0;
+    if (!hasAnchoredGameplay) return;
     onGenerateImage();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bible.canon.coreValues[0], connected, imageBusy, autoImages]);
+  }, [bible.canon.coreValues[0], bible.lastAiUtterance, bible.turnCount, bible.changelog.length, connected, imageBusy, autoImages, images.length]);
 
   // Subsequent auto-images every N turns during gameplay.
   useEffect(() => {

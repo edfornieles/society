@@ -42,7 +42,7 @@ async function main() {
     model: "gpt-image-1",
     prompt,
     n: 1,
-    size: "1536x1024",
+    size: "1024x1024",
   });
 
   const b64 = img.data?.[0]?.b64_json;

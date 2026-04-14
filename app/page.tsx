@@ -1,10 +1,5 @@
-import { SocietyProvider } from "./components/SocietyContext";
-import { GameShell } from "./components/GameShell";
+import { HomeClient } from "./HomeClient";
 
 export default function Page() {
-  return (
-    <SocietyProvider>
-      <GameShell />
-    </SocietyProvider>
-  );
+  return <HomeClient />;
 }

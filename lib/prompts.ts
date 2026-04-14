@@ -242,13 +242,19 @@ export function bibleAnchorContextForImages(bible: SocietyBible): string {
   const changelogBlock = recent.length
     ? recent.map((c) => `- [turn ${c.turn}] ${c.entry}`).join("\n")
     : "- (no changelog lines yet)";
+  const lastUser = bible.lastUserUtterance?.trim() || "(none yet)";
+  const lastAi = bible.lastAiUtterance?.trim() || "(none yet)";
   return `
 ANCHOR — facts invented in this session (image MUST be grounded here; do not invent unrelated lore):
 - Core value line(s): ${core}
-- Last thing the human said: ${bible.lastUserUtterance?.trim() || "(none yet)"}
-- Last thing the AI said (most recent in-world invention): ${bible.lastAiUtterance?.trim() || "(none yet)"}
+- Last thing the human said: ${lastUser}
+- Last thing the AI said (most recent in-world invention): ${lastAi}
 - Recent canon changelog (quote or tight paraphrase ONLY from these for seedFacts):
 ${changelogBlock}
+
+IMAGE FIDELITY (critical):
+- This picture must illustrate something said in the LAST exchange above — prioritize "${lastUser}" and/or "${lastAi}".
+- At least TWO seedFacts must be verbatim or near-verbatim snippets from those two lines (or from changelog lines that directly restate what was just said). Do not illustrate an older unrelated topic unless the dialogue is explicitly reminiscing.
 `.trim();
 }
 
@@ -285,6 +291,7 @@ Return STRICT JSON only (no markdown) with:
 
 Hard requirements (non-negotiable):
 - Every seedFact MUST trace to a line in the ANCHOR section (changelog, core value, or last human/AI utterance). If the changelog is empty, seedFacts may ONLY restate the core value and the last human/AI lines — do not fabricate extra worldbuilding.
+- At least TWO seedFacts MUST quote or tightly paraphrase "Last thing the human said" and/or "Last thing the AI said" whenever those lines are not "(none yet)". The image must depict THAT latest exchange, not an unrelated earlier topic.
 - The "prompt" field must describe a scene that could not apply to a random society: it must include concrete nouns and actions from seedFacts (e.g. a named ritual object, a distinct building feature, a specific social rule in action).
 - FORBIDDEN in title, caption, and prompt: vague phrases with no anchor such as: "embodies the values", "spirit of community", "everyday life in a utopia", "people living in harmony", "a better world", "diverse citizens", "the heart of society", "timeless tradition" — unless you immediately tie each to a named detail from seedFacts.
 - FORBIDDEN: inventing a default era (medieval village, cyberpunk city, generic castle) unless those exact cues appear in the ANCHOR text.

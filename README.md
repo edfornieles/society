@@ -98,10 +98,10 @@ Both `data/sessions/` and `public/game-images/` are git-ignored. When deploying 
 ```bash
 npm install
 echo "OPENAI_API_KEY=your_key_here" > .env.local
-npm run dev   # runs on http://127.0.0.1:3001
+npm run dev   # runs on http://127.0.0.1:3003
 ```
 
-Open <http://127.0.0.1:3001>
+Open **http://127.0.0.1:3003/** (use `http://`, not `https://`).
 
 ## 2) What's included
 

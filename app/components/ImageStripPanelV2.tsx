@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSociety } from "./SocietyContext";
-import type { GeneratedImage } from "./ImageStrip";
+import type { GeneratedImage } from "@/lib/generatedImage";
 
 export function ImageStripPanelV2() {
   const { bible, images, setImages, sessionId } = useSociety();
@@ -71,7 +71,7 @@ export function ImageStripPanelV2() {
       const r = await fetch("/api/image-generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: img.promptUsed, size: "1536x1024" }),
+        body: JSON.stringify({ prompt: img.promptUsed, size: "1024x1024" }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || !data?.b64) {
@@ -92,6 +92,7 @@ export function ImageStripPanelV2() {
   };
 
   const current = images[activeIndex] ?? images[images.length - 1];
+  const currentSrc = current?.imagePath ?? (current?.b64 ? `data:image/png;base64,${current.b64}` : "");
   const canPrev = activeIndex > 0;
   const canNext = activeIndex < images.length - 1;
   const coreChoice = String(bible.canon.coreValues?.[0] ?? "").trim();
@@ -109,12 +110,21 @@ export function ImageStripPanelV2() {
     <div className="imagePanelFull">
       {current ? (
         <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            alt={current.title}
-            src={current.imagePath ?? (current.b64 ? `data:image/png;base64,${current.b64}` : "")}
-            className="stageImageFull"
-          />
+          <div className="stageImageFrame">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              alt=""
+              src={currentSrc}
+              className="stageImageBackdrop"
+              aria-hidden="true"
+            />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              alt={current.title}
+              src={currentSrc}
+              className="stageImageForeground"
+            />
+          </div>
           <div className="floatingCaption">
             <div className="floatingTitle integratedTitle floatingTitleRow">
               <span>{current.title}</span>

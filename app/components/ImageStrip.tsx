@@ -1,14 +1,6 @@
-export type GeneratedImage = {
-  /** Base64 PNG — kept in memory for immediate display. */
-  b64?: string;
-  /** Server-relative URL to the saved PNG file, e.g. /game-images/{sessionId}/{ts}.png */
-  imagePath?: string;
-  title: string;
-  at: string;
-  caption?: string;
-  seedFacts?: string[];
-  promptUsed?: string;
-};
+import type { GeneratedImage } from "@/lib/generatedImage";
+
+export type { GeneratedImage };
 
 export function ImageStrip({ images }: { images: GeneratedImage[] }) {
   return (

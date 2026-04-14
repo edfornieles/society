@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { SocietyBible } from "@/lib/societyBible";
 import { createEmptyBible } from "@/lib/societyBible";
-import type { GeneratedImage } from "./ImageStrip";
+import type { GeneratedImage } from "@/lib/generatedImage";
 import type { SavedGame } from "@/lib/gameHistory";
 import { getGame, listGames, normalizeSavedGame, saveGame } from "@/lib/gameHistory";
 

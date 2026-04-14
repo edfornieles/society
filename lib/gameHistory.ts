@@ -1,6 +1,7 @@
 import type { SocietyBible } from "./societyBible";
+import { createEmptyBible } from "./societyBible";
 import { extractCoreTopicPhrase, normalizeCoreValueUtterance } from "./coreValueNormalize";
-import type { GeneratedImage } from "@/app/components/ImageStrip";
+import type { GeneratedImage } from "@/lib/generatedImage";
 
 export type SavedGame = {
   id: string;
@@ -121,6 +122,15 @@ export function normalizeSavedGame(game: SavedGame): { game: SavedGame; changed:
   const formatted = formatSessionTitle(core);
 
   if (core && !next.bible?.canon?.coreValues?.[0]) {
+    if (!next.bible) {
+      return { game, changed: false };
+    }
+    if (!next.bible.canon) {
+      next.bible.canon = createEmptyBible().canon;
+    }
+    if (!Array.isArray(next.bible.canon.coreValues)) {
+      next.bible.canon.coreValues = [];
+    }
     next.bible.canon.coreValues[0] = core;
     changed = true;
   }

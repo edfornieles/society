@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 3001 --hostname 127.0.0.1",
-    "dev:clean": "rm -rf .next && next dev -p 3001 --hostname 127.0.0.1",
+    "dev": "next dev -H 127.0.0.1 -p 3003",
+    "dev:clean": "rm -rf .next && next dev -H 127.0.0.1 -p 3003",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -H 127.0.0.1 -p 3003",
     "lint": "next lint"
   },
   "dependencies": {

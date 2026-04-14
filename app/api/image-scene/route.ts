@@ -38,7 +38,7 @@ export async function POST(req: Request) {
         {
           role: "system",
           content:
-            "You are an art director for an illustrated worldbuilding game. Respond ONLY with the JSON object requested — no markdown, no extra text. seedFacts must be traceable to the ANCHOR and changelog lines in the user message — do not invent new institutions, geographies, or customs that are not implied there. Captions and image prompts must show one specific moment from those facts, not generic society imagery.",
+            "You are an art director for an illustrated worldbuilding game. Respond ONLY with the JSON object requested — no markdown, no extra text. seedFacts must be traceable to the ANCHOR in the user message; at least two must come from the last human and/or last AI lines when present. The image must depict that latest exchange, not a random earlier topic. Do not invent institutions or customs not implied there.",
         },
         { role: "user", content: prompt },
       ],
@@ -83,7 +83,7 @@ export async function POST(req: Request) {
       model: "gpt-image-1",
       prompt: fullPrompt,
       n: 1,
-      size: "1536x1024",
+      size: "1024x1024",
     });
 
     const b64 = img.data?.[0]?.b64_json;

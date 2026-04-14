@@ -6,7 +6,7 @@ import { bumpTurn, createEmptyBible, addCanonLines, addOpenThreads } from "@/lib
 import { systemInstructions, bibleSummaryForModel, oobUpdatePrompt, recapPrompt, imagePromptFromBible, Playfulness } from "@/lib/prompts";
 import { safeJsonParse, sanitizeUpdate } from "@/lib/guardrails";
 import { mkSessionUpdate, mkResponseCreate } from "@/lib/realtimeEvents";
-import type { GeneratedImage } from "./ImageStrip";
+import type { GeneratedImage } from "@/lib/generatedImage";
 
 type LogLine = { at: string; dir: "in" | "out" | "sys"; text: string };
 

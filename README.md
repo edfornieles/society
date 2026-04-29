@@ -81,7 +81,7 @@ The AI actively rotates across the society's domains over a long session — val
 
 ## Where sessions are saved
 
-Sessions are stored as files on the server, not in the browser:
+By default (local dev), sessions are stored as files on the server, not in the browser:
 
 | Path | Contents |
 |---|---|
@@ -91,11 +91,25 @@ Sessions are stored as files on the server, not in the browser:
 
 Both `data/sessions/` and `public/game-images/` are git-ignored.
 
-> **Note:** All session/image storage assumes a long-lived filesystem (local dev, a VPS, or a server with persistent disk). For serverless hosts (Vercel, Netlify Functions), swap `app/api/sessions` for a database/blob store (e.g. Cloudflare R2 + KV) before going live.
+### R2-backed storage (for cloud deploys)
 
-### Storage root override
+If these env vars are set, sessions + images are stored in Cloudflare R2 instead of local disk:
 
-Set `SOCIETY_STORAGE_ROOT=/absolute/path` in `.env.local` to redirect where `public/game-images/...` files land. Defaults to `process.cwd()`.
+```bash
+R2_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET=society-canyon
+R2_PUBLIC_BASE_URL=https://pub-<hash>.r2.dev
+```
+
+R2 key layout used by the app:
+
+| R2 Key | Contents |
+|---|---|
+| `sessions/{id}.json` | Full session record |
+| `sessions/{id}.md` | Human-readable markdown session transcript |
+| `game-images/{id}/{timestamp}.png` | Generated scene images |
 
 ---
 
@@ -104,10 +118,10 @@ Set `SOCIETY_STORAGE_ROOT=/absolute/path` in `.env.local` to redirect where `pub
 ```bash
 npm install
 echo "OPENAI_API_KEY=your_key_here" > .env.local
-npm run dev   # runs on http://127.0.0.1:3003
+npm run dev   # runs on http://127.0.0.1:3003 (redirects to /society_canyon)
 ```
 
-Open **http://127.0.0.1:3003/** (use `http://`, not `https://`).
+Open **http://127.0.0.1:3003/society_canyon** (or `/`, which redirects there).
 
 ## 2) What's included
 
@@ -127,13 +141,13 @@ Open **http://127.0.0.1:3003/** (use `http://`, not `https://`).
 - `/app/api/image-scene`:
   - Uses `gpt-4o-mini` to generate a canon-consistent scene proposal
   - Generates the image with `gpt-image-1`
-  - Saves PNG to `public/game-images/{sessionId}/{timestamp}.png`
+  - Saves PNG to `public/game-images/{sessionId}/{timestamp}.png` (local) or `game-images/{sessionId}/{timestamp}.png` in R2 (cloud)
 
 - `/app/api/bible-update`:
   - Out-of-band canon extraction after each AI turn using `gpt-4o-mini`
 
 - `/app/api/sessions` and `/app/api/sessions/[id]`:
-  - File-based session persistence (read/write/delete JSON + markdown files)
+  - Session persistence (local files by default, automatic R2 mode when R2 env vars exist)
 
 - `RULES.md`:
   - Always-on rules for players and the AI; rendered in the in-app Rules panel
@@ -159,8 +173,8 @@ Quick manual check:
 2. Press Stop → confirm you return to the welcome screen.
 3. Click **Saved** and confirm the session appears with the core value as the title.
 4. Load it → images and summary should be restored.
-5. Check `data/sessions/` — you should see `{id}.json` and `{id}.md` files.
-6. Check `public/game-images/{id}/` — you should see PNG files.
+5. Local mode: check `data/sessions/` and `public/game-images/{id}/`.
+6. R2 mode: check your bucket for `sessions/{id}.json`, `sessions/{id}.md`, and `game-images/{id}/...`.
 
 ## 6) Sharing for testing
 
@@ -173,9 +187,23 @@ ngrok http --host-header=rewrite 127.0.0.1:3003     # in a second terminal
 
 Share the `https://*.ngrok-free.app` URL ngrok prints. Mic permissions require `https://`, which ngrok provides for free. Sessions and images persist on _your_ machine while the tunnel is open.
 
-For a longer-lived public URL, deploy to a host with persistent disk (Render, Fly.io, a VPS) and keep the file-based persistence; or swap in R2/S3 + a small DB and deploy to Vercel.
+For a longer-lived public URL, deploy to Cloudflare + R2 and map your custom domain path (e.g. `edfornieles.com/society`).
 
-## 7) Docs referenced
+## 7) Cheapest cloud setup (Cloudflare + R2)
+
+1. Create an R2 bucket (e.g. `society-canyon`) and enable a public bucket URL or custom domain.
+2. Add these project env vars in Cloudflare Pages:
+   - `OPENAI_API_KEY`
+   - `R2_ENDPOINT`
+   - `R2_ACCESS_KEY_ID`
+   - `R2_SECRET_ACCESS_KEY`
+   - `R2_BUCKET`
+   - `R2_PUBLIC_BASE_URL`
+3. Deploy the Next.js app to Cloudflare Pages.
+4. In Cloudflare, route `edfornieles.com/society*` to this Pages project (Transform Rule / Worker / Pages project route).
+5. Set app route to `/society_canyon` (already done); use a rule to rewrite `/society` -> `/society_canyon`.
+
+## 8) Docs referenced
 
 - Realtime WebRTC guide: <https://platform.openai.com/docs/guides/realtime-webrtc>
 - Realtime conversations/events: <https://platform.openai.com/docs/guides/realtime-conversations>

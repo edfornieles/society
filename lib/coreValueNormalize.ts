@@ -4,9 +4,16 @@
  * Also summarises elaborations ("beauty is important, and specifically physical beauty" → "physical beauty").
  */
 
-const BOILERPLATE = /\bthe\s+most\s+important\s+thing\s+in\s+this\s+society\s+is\b/gi;
+// Strip "[is/are] the most important thing in [this/the/our] society [is/are]"
+// wherever it appears. Whisper sometimes echoes the AI's question into the
+// user transcript with or without "is/are", and users phrase the answer as
+// "snakes are the most important thing" / "make snakes the most important
+// thing in this society". This regex eats the entire boilerplate clause
+// including the surrounding copula so we land cleanly on the topic noun.
+const BOILERPLATE =
+  /\s*(?:\b(?:is|are|was|were|will\s+be|would\s+be)\s+)?the\s+most\s+important\s+thing\s+in\s+(?:this|the|our)\s+society(?:\s+(?:is|are|was|were|will\s+be|would\s+be))?\b/gi;
 
-const HEDGE = /^(i think|i believe|i guess|i suppose|well|um|uh|so|like|okay|ok|alright|right)[,.]?\s+/i;
+const HEDGE = /^(i think|i believe|i guess|i suppose|i'd say|i would say|maybe|perhaps|well|um|uh|er|hmm|so|like|okay|ok|alright|right|yeah|yep|yup|yes|sure|definitely|honestly|basically|actually|let'?s see|let me think)[,.!]?\s+/i;
 
 /**
  * Prefer the user's most specific gist: e.g. drop "beauty is the most important thing"
@@ -16,11 +23,38 @@ function summarizeCoreTopicFragment(topic: string): string {
   let t = topic.replace(/\s+/g, " ").trim();
   if (!t) return t;
 
+  // Imperative form: "make/let's make/have/etc. <X> the most important thing
+  // in (this|the|our) society" — extract <X>. Run this BEFORE we strip the
+  // boilerplate so we still know where <X> was sitting.
+  const imperative = t.match(
+    /^(?:so\s+)?(?:i\s+want\s+to\s+|i'?d\s+like\s+to\s+|i\s+would\s+like\s+to\s+|let'?s\s+|let\s+us\s+|please\s+)?(?:make|have|consider|treat|put|pick|choose|select|name|call|set|count|declare|elect|crown)\s+(.+?)\s+the\s+most\s+important\s+thing\s+in\s+(?:this|the|our)\s+society\b/i
+  );
+  if (imperative?.[1]?.trim()) {
+    t = imperative[1].trim();
+  }
+
   // Remove repeated tail forms like:
   // "money, money is the most important thing in the society"
   t = t
-    .replace(/\b(?:is|are)\s+the\s+most\s+important\s+thing\s+in\s+(?:this|the)\s+society\b.*$/i, "")
+    .replace(/\b(?:is|are)\s+the\s+most\s+important\s+thing\s+in\s+(?:this|the|our)\s+society\b.*$/i, "")
     .trim();
+
+  // Strip leading bare imperative verb if it's still there
+  // (e.g. "make snakes" after Whisper dropped the rest of the sentence;
+  // also handle "make" alone, which becomes empty and gets rejected upstream).
+  t = t.replace(/^(?:make|have|put|pick|choose|set|name|call|consider|elect|crown|treat|select|count|declare)\b\s*/i, "").trim();
+  t = t.replace(/^(?:let'?s|let\s+us|please)\s+/i, "").trim();
+  t = t.replace(/^(?:for\s+me[,.!]?\s+|to\s+me[,.!]?\s+|that\s+(?:would\s+be|is|'s)\s+|it\s+(?:would\s+be|is|'s)\s+)/i, "").trim();
+
+  // Whisper sometimes drops "is" between the topic and the boilerplate, leaving
+  // "<X> the most important thing [in ...society]". Pull <X> out.
+  const noCopula = t.match(/^(.+?)\s+the\s+most\s+important\s+thing\b/i);
+  if (noCopula?.[1]?.trim()) {
+    t = noCopula[1].trim();
+  }
+
+  // Trailing copula (e.g. "snakes are" after the boilerplate was eaten).
+  t = t.replace(/\s+(?:is|are|was|were|will\s+be|would\s+be)\s*\.?$/i, "").trim();
 
   // Collapse simple duplicated fragments: "money, money" -> "money"
   const dupFragment = t.match(/^(.+?),\s*\1$/i);
@@ -101,11 +135,15 @@ export function normalizeCoreValueUtterance(raw: string): string {
     s = s.replace(HEDGE, "").trim();
   }
 
-  if (!s) return collapsed;
+  // If stripping the boilerplate / hedges ate the entire utterance, the user
+  // never gave a real topic (e.g. "make the most important thing in this
+  // society" — Whisper dropped the actual word). Return empty so the caller's
+  // weak-label guard re-asks instead of storing the boilerplate.
+  if (!s) return "";
 
   let topic = s.replace(/\.$/, "").trim();
   topic = summarizeCoreTopicFragment(topic);
-  if (!topic) return collapsed;
+  if (!topic) return "";
 
   if (hadBoilerplate) {
     return `The most important thing in this society is ${topic}.`;

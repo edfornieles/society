@@ -53,6 +53,25 @@ function isLikelyEcho(userText: string, assistantText: string) {
   return a.includes(u) || u.includes(a);
 }
 
+function isWeakCoreValueLabel(label: string): boolean {
+  const t = label.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!t) return true;
+  if (t.length < 3) return true;
+  if (/^okay[,.!\s]*$/.test(t) || /^ok[,.!\s]*$/.test(t)) return true;
+  if (/^the most important thing in this society/.test(t)) return true;
+  if (isSpuriousUserTranscript(t)) return true;
+  return false;
+}
+
+function hasConcreteFirstImageAnchor(bible: SocietyBible): boolean {
+  const generic =
+    /most important thing in this society|core value|human asserts|co-creator|started a session|session start|collaboration|inquiry on/i;
+  return bible.changelog.some((c) => {
+    const line = String(c.entry ?? "").trim();
+    return line.length > 0 && !generic.test(line);
+  });
+}
+
 function isIgnorableRealtimeError(err: any): boolean {
   const code = String(err?.code ?? err?.error?.code ?? "").toLowerCase();
   const message = String(err?.message ?? err?.error?.message ?? "").toLowerCase();
@@ -62,6 +81,25 @@ function isIgnorableRealtimeError(err: any): boolean {
   if (message.includes("cannot cancel") && message.includes("response")) return true;
   if (message.includes("response") && message.includes("already") && message.includes("done")) return true;
   return false;
+}
+
+function buildGuidedTurnInstructions(coreValue: string, userTranscript: string): string {
+  const core = coreValue.trim() || "the established core value";
+  const user = userTranscript.trim();
+  return `${ENGLISH_ONLY_INSTRUCTION}
+
+You are in active Society gameplay. Follow this exact turn structure:
+1) Mirror: exactly 1 short sentence reflecting what the user just said.
+2) Extend: 1-2 sentences adding ONE concrete in-world consequence tied to "${core}".
+3) Prompt: exactly 1 question with 2-3 options.
+
+Hard constraints:
+- Stay strictly in-world (no generic advice, no meta commentary, no "in this kind of society..." abstraction).
+- Keep total response <= 4 sentences.
+- Mention "${core}" explicitly at least once.
+- Ask only one question at the end.
+
+User just said: "${user}"`;
 }
 
 function formatSessionTitle(coreChoice: string) {
@@ -198,6 +236,7 @@ export function VoiceConsoleV2({
   const pendingFinalBreakdownRef = useRef(false);
   const lastUserTranscriptRef = useRef<string>("");
   const lastAssistantAtRef = useRef<number>(0);
+  const lastAutoImageFailureTurnRef = useRef<number>(-1);
   const resumeAfterConnectRef = useRef(false);
   // "pre_core" = before the player has answered the core question (onboarding)
   // "done"     = normal gameplay, server auto-responses are active
@@ -991,10 +1030,19 @@ Rules:
         } else {
           // Player answered the core question — save it to the bible immediately
           // and kick off the first AI gameplay turn.
-          onboardingPhaseRef.current = "done";
-
           const coreValue = normalizeCoreValueUtterance(transcript);
           const coreLabel = extractCoreTopicPhrase(coreValue);
+          if (isWeakCoreValueLabel(coreLabel)) {
+            sendEvent(
+              mkResponseCreate({
+                output_modalities: ["audio"],
+                instructions: `${ENGLISH_ONLY_INSTRUCTION} It sounds like we captured filler words instead of the actual core value. Ask the player to answer in one short phrase only (for example: "technology", "honor", or "surveillance"), then repeat exactly: "What's the most important thing in this society? Everything else will follow from it."`,
+                metadata: { topic: "core_value_clarify" },
+              })
+            );
+            return;
+          }
+          onboardingPhaseRef.current = "done";
 
           // Update the ref synchronously so sendSessionInstructions picks up
           // the core value immediately (setState is async and won't update the
@@ -1086,7 +1134,8 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
         setBible((b) => {
           const next = structuredClone(b);
           next.lastUserUtterance = coreValue;
-          if (!next.canon.coreValues[0]) {
+          const currentCore = String(next.canon.coreValues[0] ?? "").trim();
+          if (!currentCore || isWeakCoreValueLabel(extractCoreTopicPhrase(currentCore))) {
             next.canon.coreValues[0] = coreValue;
           }
           return next;
@@ -1110,6 +1159,25 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
             output_modalities: ["audio"],
             instructions: `${ENGLISH_ONLY_INSTRUCTION} The player has just named the most important thing in their society: "${coreLabel}". Treat this as the society's core value — it is now hard canon. Mirror it back warmly in one sentence. Then extend with one concrete, sensory consequence of that value in daily life (1–2 sentences). Then ask one focused follow-up question with 2–3 options to continue building the society. Keep it short and speakable.`,
             metadata: { topic: "core_value_accepted" },
+          })
+        );
+      } else if (
+        transcript &&
+        onboardingPhaseRef.current === "done" &&
+        !tooSoon &&
+        bibleRef.current.canon.coreValues[0]
+      ) {
+        // Keep the game cadence strict on every normal turn by steering the
+        // model with an explicit guided response shape.
+        sendEvent(mkResponseCancel());
+        sendEvent(
+          mkResponseCreate({
+            output_modalities: ["audio"],
+            instructions: buildGuidedTurnInstructions(
+              String(bibleRef.current.canon.coreValues[0]),
+              transcript
+            ),
+            metadata: { topic: "guided_turn" },
           })
         );
       }
@@ -1426,6 +1494,7 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
     }
     setImageBusy(true);
     const requestSessionId = sessionIdRef.current;
+    const requestTurn = bibleRef.current.turnCount;
     addLog("sys", "Generating image scene…");
     try {
       const r = await fetch("/api/image-scene", {
@@ -1439,13 +1508,38 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || (!data?.b64 && !data?.imagePath)) {
-        addLog("sys", `Image scene error: ${String(data?.error ?? r.status)}`);
+        const detail = `${String(data?.error ?? r.status)}${data?.code ? ` (${String(data.code)})` : ""}`;
+        addLog("sys", `Image scene error: ${detail}`);
+        const code = String(data?.code ?? "");
+        if (code === "moderation_blocked") {
+          window.dispatchEvent(
+            new CustomEvent("society-image-alert", {
+              detail: {
+                level: "safety",
+                message: "Image request was blocked by safety filters. Try a less explicit phrasing.",
+              },
+            })
+          );
+        } else {
+          window.dispatchEvent(
+            new CustomEvent("society-image-alert", {
+              detail: {
+                level: "error",
+                message: "Could not generate image for this turn.",
+              },
+            })
+          );
+        }
+        // Prevent immediate auto-retry loops (progress bar fills repeatedly with no image)
+        // until the conversation advances to a new turn/canon state.
+        lastAutoImageFailureTurnRef.current = requestTurn;
         return;
       }
       if (sessionIdRef.current !== requestSessionId) {
         addLog("sys", "Discarded image for previous session.");
         return;
       }
+      lastAutoImageFailureTurnRef.current = -1;
       if (!imageStyleGuide && data.styleGuide) setImageStyleGuide(data.styleGuide);
       setImages((prev) => [
         ...prev,
@@ -1476,11 +1570,9 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
     if (imageBusy) return;
     if (!bible.canon.coreValues[0]) return;
     if (images.length > 0) return;
-    const hasAnchoredGameplay =
-      Boolean(bible.lastAiUtterance?.trim()) ||
-      bible.turnCount > 0 ||
-      bible.changelog.length > 0;
-    if (!hasAnchoredGameplay) return;
+    if (lastAutoImageFailureTurnRef.current === bible.turnCount) return;
+    // First image should wait for concrete canon content, not onboarding echoes.
+    if (!hasConcreteFirstImageAnchor(bible)) return;
     onGenerateImage();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bible.canon.coreValues[0], bible.lastAiUtterance, bible.turnCount, bible.changelog.length, connected, imageBusy, autoImages, images.length]);
@@ -1494,6 +1586,7 @@ Keep it short and speakable. Do NOT say the words "mirror", "extend", or "prompt
     if (autoEveryTurns <= 0) return;
     if (bible.turnCount % autoEveryTurns !== 0) return;
     if (lastAutoImageTurnRef.current === bible.turnCount) return;
+    if (lastAutoImageFailureTurnRef.current === bible.turnCount) return;
 
     lastAutoImageTurnRef.current = bible.turnCount;
     onGenerateImage();

@@ -98,7 +98,6 @@ export async function POST(req: Request) {
         promptUsed: img.promptUsed,
         at: img.at,
         imagePath: img.imagePath ?? null,
-        // Keep b64 only if there is no imagePath yet (backwards compat)
         ...(img.imagePath ? {} : { b64: img.b64 }),
       })),
       updatedAt: Date.now(),

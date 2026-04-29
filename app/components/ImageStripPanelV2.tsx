@@ -11,6 +11,8 @@ export function ImageStripPanelV2() {
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [introStarted, setIntroStarted] = useState(false);
   const [recapActive, setRecapActive] = useState(false);
+  const [imageAlert, setImageAlert] = useState<string>("");
+  const [imageRenderFailed, setImageRenderFailed] = useState(false);
 
   useEffect(() => {
     if (images.length > 0) {
@@ -19,6 +21,22 @@ export function ImageStripPanelV2() {
       setActiveIndex(0);
     }
   }, [images.length]);
+
+  useEffect(() => {
+    setImageRenderFailed(false);
+  }, [activeIndex, images.length]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { message?: string } | undefined;
+      const msg = String(detail?.message ?? "").trim();
+      if (!msg) return;
+      setImageAlert(msg);
+      window.setTimeout(() => setImageAlert(""), 5000);
+    };
+    window.addEventListener("society-image-alert", handler);
+    return () => window.removeEventListener("society-image-alert", handler);
+  }, []);
 
   useEffect(() => {
     const handler = () => setIntroStarted(false);
@@ -92,7 +110,8 @@ export function ImageStripPanelV2() {
   };
 
   const current = images[activeIndex] ?? images[images.length - 1];
-  const currentSrc = current?.imagePath ?? (current?.b64 ? `data:image/png;base64,${current.b64}` : "");
+  const currentSrc = current?.b64 ? `data:image/png;base64,${current.b64}` : (current?.imagePath ?? "");
+  const canRenderCurrentImage = Boolean(currentSrc) && !imageRenderFailed;
   const canPrev = activeIndex > 0;
   const canNext = activeIndex < images.length - 1;
   const coreChoice = String(bible.canon.coreValues?.[0] ?? "").trim();
@@ -111,19 +130,22 @@ export function ImageStripPanelV2() {
       {current ? (
         <>
           <div className="stageImageFrame">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              alt=""
-              src={currentSrc}
-              className="stageImageBackdrop"
-              aria-hidden="true"
-            />
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              alt={current.title}
-              src={currentSrc}
-              className="stageImageForeground"
-            />
+            {canRenderCurrentImage ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                alt={current.title}
+                src={currentSrc}
+                className="stageImageForeground"
+                onError={() => setImageRenderFailed(true)}
+              />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                alt="Image unavailable"
+                src="/welcome-society.png"
+                className="stageImageForeground"
+              />
+            )}
           </div>
           <div className="floatingCaption">
             <div className="floatingTitle integratedTitle floatingTitleRow">
@@ -160,6 +182,16 @@ export function ImageStripPanelV2() {
             {lastError ? (
               <small className="muted imageError">
                 Image error: {lastError}
+              </small>
+            ) : null}
+            {!canRenderCurrentImage ? (
+              <small className="muted imageError">
+                Couldn&apos;t load this image source; showing fallback background.
+              </small>
+            ) : null}
+            {imageAlert ? (
+              <small className="muted imageNotice">
+                {imageAlert}
               </small>
             ) : null}
           </div>

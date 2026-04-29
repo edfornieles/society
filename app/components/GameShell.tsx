@@ -102,12 +102,6 @@ export function GameShell() {
               Settings
             </button>
           </div>
-          <details className="navHintDetails">
-            <summary>Session tips</summary>
-            <p className="navHintBody muted">
-              Stop ends voice only — your progress stays in this browser until you use New Game. Press Start (or Play) to reconnect voice. Use <strong>Saved</strong> to open a stored session.
-            </p>
-          </details>
         </nav>
         <div className={`imageProgressWrap ${imageBusy ? "is-visible" : "is-hidden"}`}>
           <div className="imageProgressLabel">Generating image</div>

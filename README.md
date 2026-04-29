@@ -89,7 +89,13 @@ Sessions are stored as files on the server, not in the browser:
 | `data/sessions/{id}.md` | Human-readable markdown transcript of the session (auto-generated on every save) |
 | `public/game-images/{id}/{timestamp}.png` | Scene images generated during the session |
 
-Both `data/sessions/` and `public/game-images/` are git-ignored. When deploying online, replace the file-based `app/api/sessions` routes with database calls.
+Both `data/sessions/` and `public/game-images/` are git-ignored.
+
+> **Note:** All session/image storage assumes a long-lived filesystem (local dev, a VPS, or a server with persistent disk). For serverless hosts (Vercel, Netlify Functions), swap `app/api/sessions` for a database/blob store (e.g. Cloudflare R2 + KV) before going live.
+
+### Storage root override
+
+Set `SOCIETY_STORAGE_ROOT=/absolute/path` in `.env.local` to redirect where `public/game-images/...` files land. Defaults to `process.cwd()`.
 
 ---
 
@@ -156,7 +162,20 @@ Quick manual check:
 5. Check `data/sessions/` — you should see `{id}.json` and `{id}.md` files.
 6. Check `public/game-images/{id}/` — you should see PNG files.
 
-## 6) Docs referenced
+## 6) Sharing for testing
+
+Quickest way to let someone test the running app:
+
+```bash
+npm run build && npm run start                      # boots on http://127.0.0.1:3003
+ngrok http --host-header=rewrite 127.0.0.1:3003     # in a second terminal
+```
+
+Share the `https://*.ngrok-free.app` URL ngrok prints. Mic permissions require `https://`, which ngrok provides for free. Sessions and images persist on _your_ machine while the tunnel is open.
+
+For a longer-lived public URL, deploy to a host with persistent disk (Render, Fly.io, a VPS) and keep the file-based persistence; or swap in R2/S3 + a small DB and deploy to Vercel.
+
+## 7) Docs referenced
 
 - Realtime WebRTC guide: <https://platform.openai.com/docs/guides/realtime-webrtc>
 - Realtime conversations/events: <https://platform.openai.com/docs/guides/realtime-conversations>

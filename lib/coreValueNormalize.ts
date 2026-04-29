@@ -6,7 +6,7 @@
 
 const BOILERPLATE = /\bthe\s+most\s+important\s+thing\s+in\s+this\s+society\s+is\b/gi;
 
-const HEDGE = /^(i think|i believe|i guess|i suppose|well|um|uh|so|like)[,.]?\s+/i;
+const HEDGE = /^(i think|i believe|i guess|i suppose|well|um|uh|so|like|okay|ok|alright|right)[,.]?\s+/i;
 
 /**
  * Prefer the user's most specific gist: e.g. drop "beauty is the most important thing"
@@ -15,6 +15,21 @@ const HEDGE = /^(i think|i believe|i guess|i suppose|well|um|uh|so|like)[,.]?\s+
 function summarizeCoreTopicFragment(topic: string): string {
   let t = topic.replace(/\s+/g, " ").trim();
   if (!t) return t;
+
+  // Remove repeated tail forms like:
+  // "money, money is the most important thing in the society"
+  t = t
+    .replace(/\b(?:is|are)\s+the\s+most\s+important\s+thing\s+in\s+(?:this|the)\s+society\b.*$/i, "")
+    .trim();
+
+  // Collapse simple duplicated fragments: "money, money" -> "money"
+  const dupFragment = t.match(/^(.+?),\s*\1$/i);
+  if (dupFragment?.[1]?.trim()) {
+    t = dupFragment[1].trim();
+  }
+
+  // Collapse duplicated leading token: "money, money ..." -> "money ..."
+  t = t.replace(/^([a-z0-9'/-]+)\s*,\s*\1\b\s*/i, "$1 ").trim();
 
   // 1) Narrowing phrases — take the more specific tail (highest priority).
   const narrowPatterns: RegExp[] = [

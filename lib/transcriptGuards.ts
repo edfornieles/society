@@ -10,6 +10,9 @@ export function isSpuriousUserTranscript(text: string): boolean {
 
   if (/\bhttps?:\/\//i.test(t)) return true;
   if (/\bwww\.[a-z0-9.-]+\b/i.test(t)) return true;
+  if (/\bgo\s+to\s+[a-z0-9][a-z0-9.-]*\.(ai|com|net|io|org)\b/i.test(lower)) return true;
+  if (/\bfor\s+all\s+of\s+your\s+\w+\s+needs\b/i.test(lower)) return true;
+  if (/\b(beading|craft|supply)\s+need(s)?\b/i.test(lower)) return true;
 
   if (/\botter\b/i.test(lower)) return true;
   if (/\btranscribed\s+by\b/i.test(lower)) return true;

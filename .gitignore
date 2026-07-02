@@ -18,10 +18,16 @@ node_modules/
 # OS / editor
 .DS_Store
 .vscode/
+._*
+.claude/
 
 # User-generated game data (sessions + images + debug logs)
 data/sessions/
 data/logs/
+data/media/
 public/game-images/
+
+# ComfyUI (local image gen — vendored repo + venv + large model weights)
+ComfyUI-master/
 
 

@@ -1,35 +1,58 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import { putGeneratedImage } from "@/lib/serverStorage";
+import { comfyEnabled, generateImageViaComfy } from "@/lib/comfyImage";
 
 export const runtime = "nodejs";
 
+const DEFAULT_NEGATIVE_PROMPT =
+  "text, logos, watermark, explicit nudity, explicit sexual content, gore, graphic violence, photorealistic, smooth gradients, vector art";
+
 export async function POST(req: Request) {
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
-    }
-
-    const { prompt, size } = (await req.json().catch(() => ({}))) as { prompt?: string; size?: string };
+    const { prompt, size, sessionId } = (await req.json().catch(() => ({}))) as {
+      prompt?: string;
+      size?: string;
+      sessionId?: string;
+    };
 
     if (!prompt || typeof prompt !== "string") {
       return NextResponse.json({ error: "Missing prompt" }, { status: 400 });
     }
 
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    let pngBytes: Buffer;
 
-    const img = await client.images.generate({
-      model: "gpt-image-1",
-      prompt,
-      n: 1,
-      size: (size as any) ?? "1024x1024",
-    });
-
-    const b64 = img.data?.[0]?.b64_json;
-    if (!b64) {
-      return NextResponse.json({ error: "No image returned" }, { status: 500 });
+    if (comfyEnabled()) {
+      const [w, h] = String(size ?? "1536x1024").split("x").map((n) => parseInt(n, 10));
+      pngBytes = await generateImageViaComfy({
+        prompt,
+        negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        width: Number.isFinite(w) ? w : 1536,
+        height: Number.isFinite(h) ? h : 1024,
+      });
+    } else {
+      if (!process.env.OPENAI_API_KEY) {
+        return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
+      }
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const img = await client.images.generate({
+        model: process.env.OPENAI_IMAGE_MODEL?.trim() || "gpt-image-1-mini",
+        prompt,
+        n: 1,
+        size: (size as any) ?? "1536x1024",
+        quality: (process.env.OPENAI_IMAGE_QUALITY?.trim() as "low" | "medium" | "high") || "medium",
+      });
+      const b64 = img.data?.[0]?.b64_json;
+      if (!b64) {
+        return NextResponse.json({ error: "No image returned" }, { status: 500 });
+      }
+      pngBytes = Buffer.from(b64, "base64");
     }
 
-    return NextResponse.json({ b64, mime: "image/png" });
+    // Persist so a rerolled image survives reload, same as the main scene path.
+    const imagePath = await putGeneratedImage(sessionId ?? "unknown-session", pngBytes, `${Date.now()}.png`);
+
+    return NextResponse.json({ b64: pngBytes.toString("base64"), imagePath, mime: "image/png" });
   } catch (e: any) {
     // Keep this handler resilient: always return structured JSON, never throw.
     const statusRaw = Number(e?.status ?? e?.statusCode ?? 500);

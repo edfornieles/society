@@ -2,6 +2,7 @@ import type { SocietyBible } from "./societyBible";
 import { createEmptyBible } from "./societyBible";
 import { extractCoreTopicPhrase, normalizeCoreValueUtterance } from "./coreValueNormalize";
 import type { GeneratedImage } from "@/lib/generatedImage";
+import { withBase } from "./basePath";
 
 export type SavedGame = {
   id: string;
@@ -206,7 +207,7 @@ function buildSummaryFromMemory(memory: NonNullable<SavedGame["aiMemory"]>): str
 // When the game goes online, swap these fetch() calls for database calls.
 // ---------------------------------------------------------------------------
 
-const API_BASE = "/api/sessions";
+const API_BASE = withBase("/api/sessions");
 
 export async function saveGame(game: SavedGame): Promise<void> {
   const existing = await getGame(game.id).catch(() => null);

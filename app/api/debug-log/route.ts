@@ -1,14 +1,20 @@
 import { NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "path";
+import { usingR2 } from "@/lib/serverStorage";
 
 export const runtime = "nodejs";
 
-const LOGS_DIR = path.join(process.cwd(), "data", "logs");
-
 export async function POST(req: Request) {
   try {
-    await fs.mkdir(LOGS_DIR, { recursive: true });
+    // In cloud deployments backed by R2, debug logs are best-effort no-op to
+    // avoid filesystem dependencies.
+    if (usingR2()) {
+      return NextResponse.json({ ok: true });
+    }
+
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    const logsDir = path.join(process.cwd(), "data", "logs");
+    await fs.mkdir(logsDir, { recursive: true });
     const body = await req.json().catch(() => null);
     if (!body) return NextResponse.json({ ok: false });
 
@@ -31,7 +37,7 @@ export async function POST(req: Request) {
     }
 
     const entry = lines.join("\n") + "\n";
-    const logFile = path.join(LOGS_DIR, `${sessionId ?? "unknown"}.log`);
+    const logFile = path.join(logsDir, `${sessionId ?? "unknown"}.log`);
     await fs.appendFile(logFile, entry, "utf-8");
 
     return NextResponse.json({ ok: true });

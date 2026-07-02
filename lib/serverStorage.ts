@@ -1,0 +1,379 @@
+import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
+
+type SessionRecord = Record<string, any>;
+
+const r2Endpoint = process.env.R2_ENDPOINT?.trim() || "";
+const r2AccessKeyId = process.env.R2_ACCESS_KEY_ID?.trim() || "";
+const r2SecretAccessKey = process.env.R2_SECRET_ACCESS_KEY?.trim() || "";
+const r2Bucket = process.env.R2_BUCKET?.trim() || process.env.R2_BUCKET_NAME?.trim() || "";
+
+// Storage driver selection. R2 is the intended driver for both local dev and
+// production (dev/prod parity). Local filesystem is an EXPLICIT, LOUD fallback
+// for offline dev only — it is NOT durable on serverless hosts.
+const r2Vars = { R2_ENDPOINT: r2Endpoint, R2_ACCESS_KEY_ID: r2AccessKeyId, R2_SECRET_ACCESS_KEY: r2SecretAccessKey, R2_BUCKET: r2Bucket };
+const r2Present = Object.values(r2Vars).filter(Boolean).length;
+const hasR2 = r2Present === 4;
+const partialR2 = r2Present > 0 && r2Present < 4;
+
+// Allow forcing local mode for offline dev: STORAGE_DRIVER=local
+const forceLocal = (process.env.STORAGE_DRIVER?.trim().toLowerCase() || "") === "local";
+const driver: "r2" | "local" = hasR2 && !forceLocal ? "r2" : "local";
+
+// Surface misconfiguration loudly at module load instead of silently losing data.
+if (partialR2 && !forceLocal) {
+  const missing = Object.entries(r2Vars).filter(([, v]) => !v).map(([k]) => k);
+  console.error(
+    `[storage] R2 is PARTIALLY configured — missing: ${missing.join(", ")}. ` +
+      `Falling back to LOCAL filesystem storage, which is NOT durable on serverless. ` +
+      `Set all of R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET (or STORAGE_DRIVER=local to silence this).`
+  );
+} else if (driver === "local") {
+  console.warn(
+    `[storage] Using LOCAL filesystem storage (data/). Sessions and images will NOT persist across serverless cold starts. ` +
+      `Configure R2 (R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET) for durable storage.`
+  );
+}
+
+let s3Client: S3Client | null = null;
+
+function getS3(): S3Client {
+  if (!s3Client) {
+    s3Client = new S3Client({
+      region: "auto",
+      endpoint: r2Endpoint,
+      credentials: {
+        accessKeyId: r2AccessKeyId,
+        secretAccessKey: r2SecretAccessKey,
+      },
+      forcePathStyle: true,
+    });
+  }
+  return s3Client;
+}
+
+async function streamToBuffer(body: any): Promise<Buffer> {
+  if (!body) return Buffer.alloc(0);
+  if (typeof body.transformToByteArray === "function") {
+    return Buffer.from(await body.transformToByteArray());
+  }
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of body as AsyncIterable<Uint8Array>) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+}
+
+async function streamToString(body: any): Promise<string> {
+  if (!body) return "";
+  if (typeof body.transformToString === "function") return body.transformToString();
+  return (await streamToBuffer(body)).toString("utf-8");
+}
+
+async function localPathJoin(...parts: string[]): Promise<string> {
+  const path = await import("path");
+  return path.join(...parts);
+}
+
+async function ensureLocalDir(...parts: string[]): Promise<string> {
+  const fs = await import("fs/promises");
+  const dir = await localPathJoin(process.cwd(), ...parts);
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+/** Human-readable storage status for /api/health and startup diagnostics. */
+export function getStorageStatus(): {
+  driver: "r2" | "local";
+  durable: boolean;
+  bucket: string | null;
+  partialR2: boolean;
+} {
+  return {
+    driver,
+    durable: driver === "r2",
+    bucket: driver === "r2" ? r2Bucket : null,
+    partialR2,
+  };
+}
+
+export function usingR2(): boolean {
+  return driver === "r2";
+}
+
+const CONTENT_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  json: "application/json; charset=utf-8",
+};
+
+function contentTypeFor(key: string): string {
+  const ext = key.split(".").pop()?.toLowerCase() || "";
+  return CONTENT_TYPES[ext] || "application/octet-stream";
+}
+
+export async function listSessionsFromStorage(): Promise<Array<{ id: string; title: string; createdAt: number; updatedAt: number }>> {
+  if (driver === "local") {
+    const fs = await import("fs/promises");
+    const sessionsDir = await ensureLocalDir("data", "sessions");
+    const files = await fs.readdir(sessionsDir);
+    const sessions = await Promise.all(
+      files
+        .filter((f) => f.endsWith(".json"))
+        .map(async (f) => {
+          try {
+            const raw = await fs.readFile(await localPathJoin(sessionsDir, f), "utf-8");
+            const data = JSON.parse(raw);
+            return {
+              id: String(data.id ?? ""),
+              title: String(data.title ?? data.id ?? ""),
+              createdAt: Number(data.createdAt ?? 0),
+              updatedAt: Number(data.updatedAt ?? data.createdAt ?? 0),
+            };
+          } catch {
+            return null;
+          }
+        })
+    );
+    return sessions
+      .filter(Boolean)
+      .sort((a, b) => (b!.updatedAt ?? 0) - (a!.updatedAt ?? 0)) as Array<{
+        id: string;
+        title: string;
+        createdAt: number;
+        updatedAt: number;
+      }>;
+  }
+
+  const s3 = getS3();
+  const out = await s3.send(
+    new ListObjectsV2Command({
+      Bucket: r2Bucket,
+      Prefix: "sessions/",
+    })
+  );
+  const keys = (out.Contents ?? [])
+    .map((c) => c.Key || "")
+    .filter((k) => k.endsWith(".json"));
+
+  const rows = await Promise.all(
+    keys.map(async (key) => {
+      try {
+        const obj = await s3.send(
+          new GetObjectCommand({
+            Bucket: r2Bucket,
+            Key: key,
+          })
+        );
+        const raw = await streamToString(obj.Body);
+        const data = JSON.parse(raw);
+        return {
+          id: String(data.id ?? ""),
+          title: String(data.title ?? data.id ?? ""),
+          createdAt: Number(data.createdAt ?? 0),
+          updatedAt: Number(data.updatedAt ?? data.createdAt ?? 0),
+        };
+      } catch (err) {
+        console.error(`[storage] failed to read session ${key}:`, err);
+        return null;
+      }
+    })
+  );
+
+  return rows
+    .filter(Boolean)
+    .sort((a, b) => (b!.updatedAt ?? 0) - (a!.updatedAt ?? 0)) as Array<{
+      id: string;
+      title: string;
+      createdAt: number;
+      updatedAt: number;
+    }>;
+}
+
+export async function getSessionFromStorage(id: string): Promise<SessionRecord | null> {
+  if (driver === "local") {
+    try {
+      const fs = await import("fs/promises");
+      const sessionsDir = await ensureLocalDir("data", "sessions");
+      const raw = await fs.readFile(await localPathJoin(sessionsDir, `${id}.json`), "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const s3 = getS3();
+    const obj = await s3.send(
+      new GetObjectCommand({
+        Bucket: r2Bucket,
+        Key: `sessions/${id}.json`,
+      })
+    );
+    const raw = await streamToString(obj.Body);
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function buildSessionMarkdown(data: SessionRecord): string {
+  const id = String(data.id ?? "").trim();
+  const title = String(data.title ?? "Untitled Society");
+  const created = data.createdAt ? new Date(data.createdAt).toLocaleString() : "unknown";
+  const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : created;
+  const coreValue = data.bible?.canon?.coreValues?.[0] ?? "";
+  const canonLines: string[] = (data.bible?.changelog ?? [])
+    .slice()
+    .sort((a: any, b: any) => (a.turn ?? 0) - (b.turn ?? 0))
+    .map((c: any) => `- ${c.entry ?? ""}`)
+    .filter((l: string) => l.length > 2);
+  const openThreads: string[] = (data.bible?.openThreads ?? []).map((t: string) => `- ${t}`);
+  const images: any[] = data.images ?? [];
+  const imageLines = images.map((img: any, i: number) => {
+    const src = img.imagePath ? img.imagePath : "(no path saved)";
+    return `### Image ${i + 1}: ${img.title ?? "Scene"}\n- **Caption**: ${img.caption ?? ""}\n- **File**: ${src}\n- **Generated**: ${img.at ?? ""}`;
+  });
+  return [
+    `# ${title}`,
+    `**Session ID**: ${id}`,
+    `**Created**: ${created}  |  **Last saved**: ${updated}`,
+    coreValue ? `\n## The most important thing in this society\n> ${coreValue}` : "",
+    canonLines.length ? `\n## Canon\n${canonLines.join("\n")}` : "",
+    openThreads.length ? `\n## Open threads\n${openThreads.join("\n")}` : "",
+    imageLines.length ? `\n## Images\n${imageLines.join("\n\n")}` : "",
+    data.summary ? `\n## Session summary\n${data.summary}` : "",
+    data.finalRecordText ? `\n## Final record\n${data.finalRecordText}` : "",
+    "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export async function putSessionToStorage(data: SessionRecord): Promise<void> {
+  const id = String(data.id ?? "").trim();
+  if (!id) throw new Error("Missing session id");
+
+  const md = buildSessionMarkdown(data);
+
+  if (driver === "local") {
+    const fs = await import("fs/promises");
+    const sessionsDir = await ensureLocalDir("data", "sessions");
+    await fs.writeFile(await localPathJoin(sessionsDir, `${id}.json`), JSON.stringify(data, null, 2), "utf-8");
+    await fs.writeFile(await localPathJoin(sessionsDir, `${id}.md`), md, "utf-8");
+    return;
+  }
+
+  const s3 = getS3();
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: r2Bucket,
+      Key: `sessions/${id}.json`,
+      Body: JSON.stringify(data, null, 2),
+      ContentType: "application/json; charset=utf-8",
+    })
+  );
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: r2Bucket,
+      Key: `sessions/${id}.md`,
+      Body: md,
+      ContentType: "text/markdown; charset=utf-8",
+    })
+  );
+}
+
+export async function deleteSessionFromStorage(id: string): Promise<void> {
+  if (driver === "local") {
+    const fs = await import("fs/promises");
+    const sessionsDir = await ensureLocalDir("data", "sessions");
+    await fs.unlink(await localPathJoin(sessionsDir, `${id}.json`)).catch(() => {});
+    await fs.unlink(await localPathJoin(sessionsDir, `${id}.md`)).catch(() => {});
+    await fs.rm(await localPathJoin(process.cwd(), "data", "media", "game-images", id), { recursive: true, force: true }).catch(() => {});
+    return;
+  }
+
+  const s3 = getS3();
+  await s3.send(new DeleteObjectCommand({ Bucket: r2Bucket, Key: `sessions/${id}.json` })).catch(() => {});
+  await s3.send(new DeleteObjectCommand({ Bucket: r2Bucket, Key: `sessions/${id}.md` })).catch(() => {});
+
+  const listed = await s3.send(
+    new ListObjectsV2Command({
+      Bucket: r2Bucket,
+      Prefix: `game-images/${id}/`,
+    })
+  );
+  await Promise.all(
+    (listed.Contents ?? [])
+      .map((c) => c.Key)
+      .filter(Boolean)
+      .map((key) =>
+        s3.send(
+          new DeleteObjectCommand({
+            Bucket: r2Bucket,
+            Key: key!,
+          })
+        )
+      )
+  );
+}
+
+/**
+ * Persist a generated PNG and return an APP-RELATIVE media path that is served
+ * back through /api/media/<key>. This works identically in R2 and local mode
+ * and needs no public bucket. Returns null only if the write fails.
+ */
+export async function putGeneratedImage(sessionId: string, pngBytes: Buffer, filename: string): Promise<string | null> {
+  const key = `game-images/${sessionId}/${filename}`;
+
+  try {
+    if (driver === "local") {
+      const fs = await import("fs/promises");
+      const dir = await ensureLocalDir("data", "media", "game-images", sessionId);
+      await fs.writeFile(await localPathJoin(dir, filename), pngBytes);
+      return `/api/media/${key}`;
+    }
+
+    const s3 = getS3();
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: r2Bucket,
+        Key: key,
+        Body: pngBytes,
+        ContentType: "image/png",
+      })
+    );
+    return `/api/media/${key}`;
+  } catch (err) {
+    console.error(`[storage] putGeneratedImage failed for ${key}:`, err);
+    return null;
+  }
+}
+
+/** Fetch a stored media object (image) by key, for the /api/media route. */
+export async function getMediaObject(key: string): Promise<{ body: Buffer; contentType: string } | null> {
+  const cleanKey = key.replace(/^\/+/, "");
+  // Guard against path traversal.
+  if (cleanKey.includes("..")) return null;
+
+  try {
+    if (driver === "local") {
+      const fs = await import("fs/promises");
+      const filePath = await localPathJoin(process.cwd(), "data", "media", cleanKey);
+      const body = await fs.readFile(filePath);
+      return { body, contentType: contentTypeFor(cleanKey) };
+    }
+
+    const s3 = getS3();
+    const obj = await s3.send(
+      new GetObjectCommand({
+        Bucket: r2Bucket,
+        Key: cleanKey,
+      })
+    );
+    const body = await streamToBuffer(obj.Body);
+    return { body, contentType: obj.ContentType || contentTypeFor(cleanKey) };
+  } catch {
+    return null;
+  }
+}

@@ -10,9 +10,9 @@ export async function POST(req: Request) {
 
   const url = new URL(req.url);
   const voice = url.searchParams.get("voice") ?? "marin";
-  // Default to full gpt-realtime for reliable WebRTC audio; set OPENAI_REALTIME_MODEL=gpt-realtime-mini to save cost.
+  // Default to gpt-realtime-mini (cheaper/faster); set OPENAI_REALTIME_MODEL=gpt-realtime for the full model.
   const model =
-    process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime";
+    process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime-mini";
 
   // language=en for Whisper. Keep transcription.prompt to short keywords only — long
   // sentences are often hallucinated into the user transcript as if spoken.

@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useSociety } from "./SocietyContext";
 import type { GeneratedImage } from "@/lib/generatedImage";
+import { withBase, mediaSrc } from "@/lib/basePath";
+import { extractCoreTopicPhrase } from "@/lib/coreValueNormalize";
 
 export function ImageStripPanelV2() {
   const { bible, images, setImages, sessionId } = useSociety();
@@ -15,12 +17,16 @@ export function ImageStripPanelV2() {
   const [imageRenderFailed, setImageRenderFailed] = useState(false);
 
   useEffect(() => {
+    // During a recap the narration drives which image shows (via
+    // society-recap-show-image); don't let a stray image arriving mid-recap
+    // yank the slideshow to the newest picture.
+    if (recapActive) return;
     if (images.length > 0) {
       setActiveIndex(images.length - 1);
     } else {
       setActiveIndex(0);
     }
-  }, [images.length]);
+  }, [images.length, recapActive]);
 
   useEffect(() => {
     setImageRenderFailed(false);
@@ -76,6 +82,26 @@ export function ImageStripPanelV2() {
     return () => window.removeEventListener("society-recap-slideshow", handler);
   }, [images.length]);
 
+  // Narration-driven recap: the voice console emits one of these per image as
+  // it speaks that image's story beat, so the picture on screen always matches
+  // what's being narrated (instead of the old dumb timer). `done` clears the
+  // recap highlight when the narration finishes.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { index?: number; done?: boolean } | undefined;
+      if (detail?.done) {
+        setRecapActive(false);
+        return;
+      }
+      if (images.length === 0) return;
+      const idx = Math.max(0, Math.min(images.length - 1, Number(detail?.index ?? 0)));
+      setRecapActive(true);
+      setActiveIndex(idx);
+    };
+    window.addEventListener("society-recap-show-image", handler);
+    return () => window.removeEventListener("society-recap-show-image", handler);
+  }, [images.length]);
+
   const onReroll = async () => {
     const img = images[activeIndex];
     if (!img?.promptUsed) {
@@ -86,10 +112,10 @@ export function ImageStripPanelV2() {
     setBusyKey(key);
     setLastError("");
     try {
-      const r = await fetch("/api/image-generate", {
+      const r = await fetch(withBase("/api/image-generate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: img.promptUsed, size: "1024x1024" }),
+        body: JSON.stringify({ prompt: img.promptUsed, size: "1536x1024", sessionId }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || !data?.b64) {
@@ -101,7 +127,12 @@ export function ImageStripPanelV2() {
         const next = prev.slice();
         const cur = next[activeIndex];
         if (!cur) return prev;
-        next[activeIndex] = { ...cur, b64: String(data.b64), at: new Date().toLocaleString() } satisfies GeneratedImage;
+        next[activeIndex] = {
+          ...cur,
+          b64: String(data.b64),
+          imagePath: data.imagePath ?? cur.imagePath ?? null,
+          at: new Date().toLocaleString(),
+        } satisfies GeneratedImage;
         return next;
       });
     } finally {
@@ -110,11 +141,17 @@ export function ImageStripPanelV2() {
   };
 
   const current = images[activeIndex] ?? images[images.length - 1];
-  const currentSrc = current?.b64 ? `data:image/png;base64,${current.b64}` : (current?.imagePath ?? "");
+  const currentSrc = current?.b64
+    ? `data:image/png;base64,${current.b64}`
+    : mediaSrc(current?.imagePath);
   const canRenderCurrentImage = Boolean(currentSrc) && !imageRenderFailed;
   const canPrev = activeIndex > 0;
   const canNext = activeIndex < images.length - 1;
-  const coreChoice = String(bible.canon.coreValues?.[0] ?? "").trim();
+  // canon.coreValues[0] sometimes stores the full sentence ("The most important
+  // thing in this society is art.") and sometimes just the bare topic — the
+  // caption templates below already say "THE MOST IMPORTANT THING...", so they
+  // need the bare topic only or the phrase doubles up.
+  const coreChoice = extractCoreTopicPhrase(String(bible.canon.coreValues?.[0] ?? "").trim());
   const showPrompt = introStarted && !coreChoice;
   const showCoreChoiceUntilImage = introStarted && coreChoice && images.length === 0;
   const rawCaption = current?.caption?.trim() ?? "";
@@ -142,7 +179,7 @@ export function ImageStripPanelV2() {
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 alt="Image unavailable"
-                src="/welcome-society.png"
+                src={withBase("/welcome-society.png")}
                 className="stageImageForeground"
               />
             )}
@@ -199,9 +236,9 @@ export function ImageStripPanelV2() {
       ) : (
         <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img alt="Welcome To Society" src="/welcome-society.png" className="stageImageFull" />
+          <img alt="Welcome To Society" src={withBase("/welcome-society.png")} className="stageImageFull" />
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img alt="Society logo" src="/society_logo.png" className="centerLogo" />
+          <img alt="Society logo" src={withBase("/society_logo.png")} className="centerLogo" />
           <div className="floatingCaption">
             {!introStarted ? (
                   <p className="welcomeBody">

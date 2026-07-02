@@ -57,21 +57,28 @@ export function SessionPickerV2({
   if (!showSaved) return null;
 
   return (
-    <div className="card sessionCard">
-      <select
-        value={selectedId}
-        disabled={disabled || loading || options.length === 0}
-        onChange={(e) => onSelect(e.target.value)}
-        className="sessionSelect"
-        aria-label="Saved sessions"
-      >
-        <option value="">{options.length ? "Select a session…" : "No saved sessions yet"}</option>
-        {options.map((g) => (
-          <option key={g.id} value={g.id}>
-            {(g.title || "Untitled society") + " — " + new Date(g.createdAt).toLocaleDateString()}
-          </option>
-        ))}
-      </select>
+    <div className="card sessionCard" role="menu" aria-label="Saved sessions">
+      <div className="sessionCardHeader">SAVED SOCIETIES</div>
+      {options.length === 0 ? (
+        <p className="sessionEmpty">No saved sessions yet.</p>
+      ) : (
+        <div className="sessionList">
+          {options.map((g) => (
+            <button
+              key={g.id}
+              type="button"
+              role="menuitem"
+              className={`sessionRow ${g.id === selectedId ? "sessionRow--active" : ""}`}
+              disabled={disabled || loading}
+              onClick={() => onSelect(g.id)}
+            >
+              <span className="sessionRowTitle">{g.title || "Untitled society"}</span>
+              <span className="sessionRowDate">{new Date(g.createdAt).toLocaleDateString()}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {loading ? <div className="sessionLoading">Loading…</div> : null}
     </div>
   );
 }

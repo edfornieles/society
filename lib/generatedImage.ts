@@ -2,8 +2,8 @@
 export type GeneratedImage = {
   /** Base64 PNG — kept in memory for immediate display. */
   b64?: string;
-  /** Server-relative URL to the saved PNG file, e.g. /game-images/{sessionId}/{ts}.png */
-  imagePath?: string;
+  /** App-relative URL that streams the saved PNG, e.g. /api/media/game-images/{sessionId}/{ts}.png */
+  imagePath?: string | null;
   title: string;
   at: string;
   caption?: string;

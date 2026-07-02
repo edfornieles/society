@@ -33,5 +33,17 @@ export function isSpuriousUserTranscript(text: string): boolean {
   // Full-line echo of our old long prompt
   if (/lines\s+like\s+transcribed\s+by\s+or\s+captions/i.test(lower)) return true;
 
+  // Well-documented Whisper hallucinations on silence/near-silence/background
+  // noise — Whisper's training data is heavily YouTube captions, so on weak
+  // or ambiguous audio it fabricates plausible-sounding boilerplate instead
+  // of recognizing there's no real speech. These are near-verbatim matches
+  // for the most common hallucinated phrases, not things a player would
+  // actually say mid-game.
+  if (/^(thanks?|thank you)\s+(for\s+watching|for\s+listening)[.!]?$/i.test(t)) return true;
+  if (/\bplease\s+(subscribe|like\s+and\s+subscribe)\b/i.test(lower)) return true;
+  if (/\bsee\s+you\s+(in\s+the\s+)?next\s+(video|time)\b/i.test(lower)) return true;
+  if (/^(bye|goodbye)[.!]?$/i.test(t)) return true;
+  if (/\bcopyright\b.*\ball\s+rights\s+reserved\b/i.test(lower)) return true;
+
   return false;
 }

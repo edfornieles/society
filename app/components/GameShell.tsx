@@ -1,16 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SessionPickerV2 } from "./SessionPickerV2";
-import { VoiceConsoleV2 } from "./VoiceConsoleV2";
+import { OpenVoiceConsole } from "./OpenVoiceConsole";
 import { ImageStripV2 } from "./ImageStripV2";
 import { RulesPanel } from "./RulesPanel";
 import { useSociety } from "./SocietyContext";
-import { createEmptyBible } from "@/lib/societyBible";
 import type { Playfulness } from "@/lib/prompts";
+import { withBase } from "@/lib/basePath";
 
 export function GameShell() {
-  const { setBible, setImages, setFinalRecord, setSummary, setSessionId } = useSociety();
+  const { bible, summary } = useSociety();
   const [showRules, setShowRules] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
@@ -19,10 +19,16 @@ export function GameShell() {
   const [showRecapPrompt, setShowRecapPrompt] = useState(false);
   const [hasLoadedSession, setHasLoadedSession] = useState(false);
   const [resumeMode, setResumeMode] = useState<"new" | "continue" | "recap">("new");
+  // Filled by OpenVoiceConsole with its "start a fresh game" fn so the New Game
+  // button can invoke it directly inside this React click (reliable activation).
+  const newGameRef = useRef<(() => void) | null>(null);
 
-  const [voice, setVoice] = useState<"marin" | "alloy" | "verse" | "aria" | "ember">("marin");
   const [playfulness, setPlayfulness] = useState<Playfulness>(2);
   const [autoImages, setAutoImages] = useState(true);
+  // Back to every turn per request — per-image cost is already controlled via
+  // gpt-image-1-mini at "medium" quality (~8-12x cheaper than the original
+  // unset-quality gpt-image-1 setup), so every-turn generation here is not
+  // the same cost problem it was before that fix.
   const [autoEveryTurns, setAutoEveryTurns] = useState(1);
 
   useEffect(() => {
@@ -61,17 +67,28 @@ export function GameShell() {
 
   const progressStep = Math.min(100, Math.max(0, Math.round(imageProgress / 10) * 10));
 
+  // Written recap shown in the recap modal so a returning player can read what
+  // was built before deciding to recap aloud or continue.
+  const coreValue = String(bible?.canon?.coreValues?.[0] ?? "").trim();
+  const canonHighlights = (bible?.changelog ?? [])
+    .slice()
+    .sort((a, b) => (a.turn ?? 0) - (b.turn ?? 0))
+    .map((c) => String(c.entry ?? "").trim())
+    .filter((e) => e.length > 2)
+    .slice(-6);
+  const hasWrittenRecap = Boolean(summary?.trim()) || Boolean(coreValue) || canonHighlights.length > 0;
+
   const onNewGame = () => {
     window.localStorage.removeItem("society:lastSessionId");
     window.localStorage.setItem("society:skipAutoLoad", "1");
     setShowSaved(false);
+    setShowRecapPrompt(false);
     setHasLoadedSession(false);
     setResumeMode("new");
-    setSessionId("");
-    setBible(createEmptyBible());
-    setImages([]);
-    setFinalRecord("");
-    setSummary("");
+    // Start a fresh game immediately, in this same click. The console owns the
+    // session/state reset + greeting (doNewGame); calling it directly here —
+    // rather than via a window event — makes activation reliable.
+    newGameRef.current?.();
   };
 
   return (
@@ -80,7 +97,7 @@ export function GameShell() {
         <nav className="topNav">
           <button className="logoPixel logoButton" onClick={onNewGame} type="button" aria-label="New game">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/society_logo_upper_corner.png" alt="Society" className="logoImage" />
+            <img src={withBase("/society_logo_upper_corner.png")} alt="Society" className="logoImage" />
           </button>
           <div className="hudNav">
             <button onClick={onNewGame}>New Game</button>
@@ -110,20 +127,18 @@ export function GameShell() {
           </div>
         </div>
         <aside className="gameSidebar">
-          <VoiceConsoleV2
-            showRules={showRules}
+          <OpenVoiceConsole
             showSettings={showSettings}
             onToggleSettings={() => setShowSettings((v) => !v)}
             startLabel={hasLoadedSession ? "Play" : "Start"}
             resumeMode={resumeMode}
-            voice={voice}
-            setVoice={setVoice}
             playfulness={playfulness}
             setPlayfulness={setPlayfulness}
             autoImages={autoImages}
             setAutoImages={setAutoImages}
             autoEveryTurns={autoEveryTurns}
             setAutoEveryTurns={setAutoEveryTurns}
+            newGameRef={newGameRef}
           />
         </aside>
 
@@ -158,8 +173,30 @@ export function GameShell() {
               </button>
             </div>
             <div className="modalBody">
+              {hasWrittenRecap ? (
+                <div className="recapSummary">
+                  {coreValue ? (
+                    <p className="recapCore">
+                      <span className="muted">The most important thing in this society:</span>
+                      <br />
+                      <strong>{coreValue}</strong>
+                    </p>
+                  ) : null}
+                  {summary?.trim() ? (
+                    <pre className="recapText">{summary.trim()}</pre>
+                  ) : canonHighlights.length > 0 ? (
+                    <ul className="recapList">
+                      {canonHighlights.map((entry, i) => (
+                        <li key={i}>{entry}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="muted">This session is just getting started — nothing to recap yet.</p>
+              )}
               <p className="muted">
-                Want a quick recap of everything built so far before you continue?
+                Want the recap read aloud before you continue, or jump straight back in?
               </p>
               <div className="kv">
                 <button

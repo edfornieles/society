@@ -1,0 +1,115 @@
+import { NextResponse } from "next/server";
+import OpenAI from "openai";
+
+export const runtime = "nodejs";
+
+/**
+ * POST /api/voice-turn — same shape as /api/text-turn, but routed through
+ * OpenRouter to an uncensored open-weight model instead of OpenAI. Used by
+ * the local voice pipeline (Whisper STT -> this -> Pocket-TTS) specifically
+ * because OpenAI's own moderation layer can't be relaxed via prompting for
+ * genuinely dark fictional content — this swaps the model, not just the
+ * prompt, to actually change what content gets through.
+ */
+export async function POST(req: Request) {
+  try {
+    if (!process.env.OPENROUTER_API_KEY) {
+      return NextResponse.json({ error: "Missing OPENROUTER_API_KEY" }, { status: 500 });
+    }
+
+    const { instructions, json, history, stream, maxTokens } = (await req.json().catch(() => ({}))) as {
+      instructions?: string;
+      json?: boolean;
+      history?: { role: "user" | "assistant"; content: string }[];
+      stream?: boolean;
+      maxTokens?: number;
+    };
+
+    if (!instructions || typeof instructions !== "string") {
+      return NextResponse.json({ error: "Missing instructions" }, { status: 400 });
+    }
+
+    const client = new OpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+    const model = process.env.OPENROUTER_MODEL?.trim() || "thedrummer/cydonia-24b-v4.1";
+
+    // Real turn-by-turn history (instead of re-deriving "what's been said" into
+    // the system prompt each call) lets the model track the world the way any
+    // chat model tracks context — the caller caps this to a rolling window.
+    const historyMessages = Array.isArray(history)
+      ? history
+          .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+          .map((m) => ({ role: m.role, content: m.content.trim() }))
+      : [];
+
+    const messages = [{ role: "system" as const, content: instructions }, ...historyMessages];
+
+    // Streaming path (spoken conversational turns): pipe token deltas straight
+    // back to the client as plain-text chunks so it can start TTS on the first
+    // sentence while the rest of the reply is still generating. This is the
+    // single biggest latency win — audio starts after the first sentence, not
+    // after the whole (potentially multi-second) completion.
+    if (stream && !json) {
+      const completion = await client.chat.completions.create({
+        model,
+        messages,
+        max_tokens: 220,
+        stream: true,
+      });
+      const encoder = new TextEncoder();
+      const rs = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          try {
+            for await (const chunk of completion) {
+              const delta = chunk.choices?.[0]?.delta?.content ?? "";
+              if (delta) controller.enqueue(encoder.encode(delta));
+            }
+          } catch {
+            // Upstream hiccup mid-stream — close cleanly with whatever we sent.
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(rs, {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+        },
+      });
+    }
+
+    // Token budget: an explicit maxTokens (e.g. a spoken RECAP, which is a
+    // multi-sentence chronicle, not a 2-line conversational turn) wins; else
+    // JSON calls get room for their schema and a plain turn stays tight.
+    const cap =
+      Number.isFinite(maxTokens) && (maxTokens as number) > 0
+        ? Math.min(1500, Math.floor(maxTokens as number))
+        : json
+        ? 900
+        : 220;
+    const completion = await client.chat.completions.create({
+      model,
+      messages,
+      max_tokens: cap,
+      // Open-weight models via OpenRouter don't all honor strict JSON mode as
+      // reliably as OpenAI's — callers already fall back through safeJsonParse
+      // when this doesn't come back perfectly structured.
+      ...(json ? { response_format: { type: "json_object" as const } } : {}),
+    });
+
+    const text = completion.choices[0]?.message?.content ?? "";
+    if (!text) {
+      return NextResponse.json({ error: "No text returned" }, { status: 500 });
+    }
+
+    return NextResponse.json({ text });
+  } catch (e: any) {
+    const statusRaw = Number(e?.status ?? e?.statusCode ?? 500);
+    const status = statusRaw >= 400 && statusRaw < 600 ? statusRaw : 500;
+    const message = String(e?.message ?? "Voice turn failed");
+    return NextResponse.json({ error: message }, { status });
+  }
+}

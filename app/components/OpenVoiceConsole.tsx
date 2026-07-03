@@ -190,6 +190,10 @@ export function OpenVoiceConsole({
   const pcmProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const pcmSilentGainRef = useRef<GainNode | null>(null);
   const pcmSampleRateRef = useRef<number>(0);
+  // Speculative STT (see VAD_STT_SPECULATE_MS): the transcription fired during
+  // the end-of-turn hold. endCapture consumes it instead of transcribing fresh.
+  const specSttPromiseRef = useRef<Promise<string> | null>(null);
+  const specSttFiredRef = useRef(false);
   const micStreamRef = useRef<MediaStream | null>(null);
   // One AudioContext shared by mic-VAD analysis AND TTS-playback analysis,
   // created/unlocked on the Start button click (the one guaranteed direct
@@ -1323,9 +1327,16 @@ export function OpenVoiceConsole({
   // them a generous window; once they've been talking a while, tighten it so
   // the response feels snappy. A fixed 700ms cut people off early; a fixed
   // 900ms felt laggy — splitting by utterance age serves both.
-  const VAD_SILENCE_HOLD_EARLY_MS = 1050; // utterance younger than the threshold below
-  const VAD_SILENCE_HOLD_MS = 800; // established utterance
+  const VAD_SILENCE_HOLD_EARLY_MS = 900; // utterance younger than the threshold below
+  const VAD_SILENCE_HOLD_MS = 650; // established utterance
   const VAD_EARLY_UTTERANCE_MS = 3000; // "young" cutoff for the above
+  // Snappiness: fire transcription this early into trailing silence, in
+  // PARALLEL with the (longer) end-of-turn hold, so the ~500ms STT round-trip
+  // overlaps the wait instead of adding to it (unmute.sh transcribes while you
+  // talk; this is the file-API approximation). The hold still governs when the
+  // turn actually ends, so this never cuts anyone off — worst case is a wasted
+  // STT call when a pause turns out to be mid-thought.
+  const VAD_STT_SPECULATE_MS = 320;
   const VAD_MAX_RECORD_MS = 20000;
   // Barge-in (talking over the model) needs a HIGHER bar than normal onset:
   // the model's own voice leaks into the mic even with echo cancellation, so
@@ -1550,6 +1561,7 @@ export function OpenVoiceConsole({
           if (isSpeech) {
             hasSpokenRef.current = true;
             silenceSinceRef.current = null;
+            invalidateSpeculativeStt(); // a resumed word makes the pending transcript stale
           } else if (hasSpokenRef.current && silenceSinceRef.current === null) {
             silenceSinceRef.current = now;
           }
@@ -1558,6 +1570,11 @@ export function OpenVoiceConsole({
           // Adaptive hold: generous while the utterance is young (mid-thought
           // pauses), tighter once established (snappy turn-taking).
           const holdMs = totalElapsed < VAD_EARLY_UTTERANCE_MS ? VAD_SILENCE_HOLD_EARLY_MS : VAD_SILENCE_HOLD_MS;
+          // Head-start the transcription partway through the silence so its
+          // round-trip overlaps the remaining hold instead of following it.
+          if (hasSpokenRef.current && silenceElapsed >= VAD_STT_SPECULATE_MS) {
+            fireSpeculativeStt();
+          }
           // Live envelope trace (throttled ~150ms) — shows RMS vs the threshold
           // it must clear to count as speech, so a quiet stretch that is about
           // to trip the silence timer is visible before the cutoff fires.
@@ -1643,6 +1660,8 @@ export function OpenVoiceConsole({
     captureStartedAtRef.current = now;
     hasSpokenRef.current = true; // we only get here because speech was detected
     silenceSinceRef.current = null;
+    specSttFiredRef.current = false;
+    specSttPromiseRef.current = null;
     setRecordingSync(true);
     if (typeof window !== "undefined" && ((window as any).__VAD_DEBUG ?? process.env.NODE_ENV !== "production")) {
       // eslint-disable-next-line no-console
@@ -1655,60 +1674,84 @@ export function OpenVoiceConsole({
     }
   };
 
-  const endCapture = () => {
-    if (!recordingRef.current) return;
-    setRecordingSync(false);
-    // Take pre-roll + utterance out of the tap and reset it to rolling mode.
-    const chunks = pcmChunksRef.current;
-    pcmChunksRef.current = [];
+  /** Fire the transcription request for a WAV blob. Pure network call — returns
+   *  the trimmed transcript ("" if empty/no audio). Used both speculatively
+   *  (during the hold) and, as a fallback, at endCapture. */
+  const transcribeBlob = async (blob: Blob): Promise<string> => {
+    if (blob.size <= 44) return ""; // WAV header only — no audio
+    const form = new FormData();
+    form.set("audio", blob, "speech.wav");
+    // Bias transcription toward THIS society's vocabulary so unusual answers
+    // (proper nouns, "beach culture", faction names) aren't misheard. The core
+    // value + the agent's last question are the words the player is most likely
+    // echoing right now. Kept short — a long prompt hurts accuracy.
+    const b = bibleRef.current;
+    const hintParts = [b?.canon?.coreValues?.[0], b?.lastAiUtterance].filter(
+      (s): s is string => typeof s === "string" && s.trim().length > 0
+    );
+    const hint = hintParts.join(" ").replace(/\s+/g, " ").trim().slice(0, 240);
+    if (hint) form.set("hint", hint);
+    const r = await fetch(withBase("/api/transcribe"), { method: "POST", body: form });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || typeof data?.text !== "string") {
+      throw new Error(String(data?.error ?? "Transcription failed"));
+    }
+    return data.text.trim();
+  };
+
+  /** Snapshot the current buffer and start transcribing it NOW, in parallel
+   *  with the still-running end-of-turn hold (see VAD_STT_SPECULATE_MS). */
+  const fireSpeculativeStt = () => {
+    if (specSttFiredRef.current) return;
     const sampleRate = pcmSampleRateRef.current;
-    if (!chunks.length || !sampleRate) return;
-    void transcribeRecording(encodeWavFromPcm(chunks, sampleRate));
+    if (!pcmChunksRef.current.length || !sampleRate) return;
+    specSttFiredRef.current = true;
+    setTranscribing(true);
+    // slice() → a stable snapshot; the tap keeps appending (only trailing
+    // silence) until endCapture, so this transcript is already complete.
+    specSttPromiseRef.current = transcribeBlob(encodeWavFromPcm(pcmChunksRef.current.slice(), sampleRate));
+  };
+
+  /** A resumed word invalidates any pending speculative transcript. */
+  const invalidateSpeculativeStt = () => {
+    specSttFiredRef.current = false;
+    specSttPromiseRef.current = null; // in-flight fetch still completes but is ignored
   };
 
   // The mic never closes mid-session, so dead-end paths (empty/junk/failed
   // transcription) just return — the always-on monitor loop is already
   // listening for the next utterance. No manual restart needed.
-  const transcribeRecording = async (blob: Blob) => {
-    if (blob.size <= 44) return; // WAV header only — no audio
-    setTranscribing(true);
-    try {
-      const form = new FormData();
-      form.set("audio", blob, "speech.wav");
-      // Bias transcription toward THIS society's vocabulary so unusual answers
-      // (proper nouns, "beach culture", faction names) aren't misheard. The
-      // core value + the agent's last question are the words the player is most
-      // likely echoing right now. Kept short — a long prompt hurts accuracy.
-      const b = bibleRef.current;
-      const hintParts = [
-        b?.canon?.coreValues?.[0],
-        b?.lastAiUtterance,
-      ].filter((s): s is string => typeof s === "string" && s.trim().length > 0);
-      const hint = hintParts.join(" ").replace(/\s+/g, " ").trim().slice(0, 240);
-      if (hint) form.set("hint", hint);
-      const r = await fetch(withBase("/api/transcribe"), { method: "POST", body: form });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || typeof data?.text !== "string") {
-        setMicError(String(data?.error ?? "Transcription failed"));
-        return;
-      }
-      const text = data.text.trim();
-      if (!text) return;
-      // Whisper hallucinates plausible-sounding boilerplate (URLs, "thank you
-      // for watching") on silence/background noise rather than recognizing
-      // there's no real speech — this was landing straight in canon before
-      // this guard existed. Discard it rather than treating fabricated text as
-      // something the player said.
-      if (isSpuriousUserTranscript(text)) {
-        addLine("sys", "Ignored a junk transcription (likely background noise) — go ahead and speak again.");
-        return;
-      }
-      void sendUserMessage(text);
-    } catch (e) {
-      setMicError(String((e as Error)?.message ?? "Transcription failed"));
-    } finally {
-      setTranscribing(false);
+  const finishTranscript = (text: string) => {
+    setTranscribing(false);
+    const t = text.trim();
+    if (!t) return;
+    // Whisper hallucinates plausible-sounding boilerplate (URLs, "thank you for
+    // watching") on silence/background noise rather than recognizing there's no
+    // real speech — discard it rather than treating fabricated text as speech.
+    if (isSpuriousUserTranscript(t)) {
+      addLine("sys", "Ignored a junk transcription (likely background noise) — go ahead and speak again.");
+      return;
     }
+    void sendUserMessage(t);
+  };
+
+  const endCapture = () => {
+    if (!recordingRef.current) return;
+    setRecordingSync(false);
+    const chunks = pcmChunksRef.current;
+    pcmChunksRef.current = [];
+    const sampleRate = pcmSampleRateRef.current;
+    // Prefer the speculative transcript already in flight (its ~500ms overlapped
+    // the hold); fall back to a fresh transcription if none was fired.
+    const spec = specSttPromiseRef.current;
+    specSttPromiseRef.current = null;
+    specSttFiredRef.current = false;
+    const p = spec ?? (chunks.length && sampleRate ? transcribeBlob(encodeWavFromPcm(chunks, sampleRate)) : null);
+    if (!p) return;
+    p.then(finishTranscript).catch((e) => {
+      setTranscribing(false);
+      setMicError(String((e as Error)?.message ?? "Transcription failed"));
+    });
   };
 
   useEffect(() => {

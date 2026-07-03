@@ -1,0 +1,33 @@
+// Deploy config for the live Worker serving edfornieles.com/society.
+// Mirrors the bindings of the existing deployed "society" Worker so a
+// `npx opennextjs-cloudflare deploy` updates it in place (routes, custom
+// domains, and secrets persist across deploys; keep_vars preserves any
+// dashboard-set plain vars).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "society",
+  "account_id": "a257d20748dbf6badd898ffcf58e8f3d",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "keep_vars": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "images": {
+    "binding": "IMAGES"
+  },
+  "r2_buckets": [
+    {
+      "binding": "NEXT_INC_CACHE_R2_BUCKET",
+      "bucket_name": "society-opennext-cache"
+    }
+  ],
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "society"
+    }
+  ]
+}

@@ -26,34 +26,62 @@ export async function POST(req: Request) {
     // via huggingface_hub after first use, so no repeat downloads).
     const defaultVoice = process.env.POCKET_TTS_VOICE?.trim() || "hf://kyutai/tts-voices/vctk/p329_023.wav";
 
-    const form = new FormData();
-    form.set("text", text);
-    form.set("voice_url", voice?.trim() || defaultVoice);
+    // Pocket-TTS only exists on localhost, so in cloud deploys it is always
+    // unreachable — fall through to OpenAI TTS there instead of going silent.
+    // Locally nothing changes: Pocket answers first and keeps the Watercooler
+    // voice. TTS_PROVIDER=openai forces the fallback path explicitly.
+    const forceOpenAi = (process.env.TTS_PROVIDER?.trim().toLowerCase() ?? "") === "openai";
+    if (!forceOpenAi) {
+      try {
+        const form = new FormData();
+        form.set("text", text);
+        form.set("voice_url", voice?.trim() || defaultVoice);
+        const r = await fetch(`${baseUrl}/tts`, { method: "POST", body: form });
+        if (r.ok) {
+          const audio = await r.arrayBuffer();
+          return new Response(audio, {
+            status: 200,
+            headers: { "Content-Type": "audio/wav" },
+          });
+        }
+      } catch {
+        // unreachable — try the hosted fallback below
+      }
+    }
 
-    const r = await fetch(`${baseUrl}/tts`, { method: "POST", body: form });
-    if (!r.ok) {
-      const detail = await r.text().catch(() => "");
+    if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: `Pocket-TTS server error: ${r.status}${detail ? ` — ${detail.slice(0, 200)}` : ""}` },
+        { error: "Pocket-TTS server not reachable and no OPENAI_API_KEY for fallback TTS" },
         { status: 502 }
       );
     }
-
+    const r = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_TTS_MODEL?.trim() || "gpt-4o-mini-tts",
+        voice: process.env.OPENAI_TTS_VOICE?.trim() || "ash",
+        input: text,
+        response_format: "mp3",
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      return NextResponse.json(
+        { error: `Fallback TTS error: ${r.status}${detail ? ` — ${detail.slice(0, 200)}` : ""}` },
+        { status: 502 }
+      );
+    }
     const audio = await r.arrayBuffer();
     return new Response(audio, {
       status: 200,
-      headers: { "Content-Type": "audio/wav" },
+      headers: { "Content-Type": "audio/mpeg" },
     });
   } catch (e: any) {
     const message = String(e?.message ?? "TTS request failed");
-    const unreachable = message.includes("fetch failed") || message.includes("ECONNREFUSED");
-    return NextResponse.json(
-      {
-        error: unreachable
-          ? "Pocket-TTS server not reachable — is it running? (pocket-tts serve --port 8123)"
-          : message,
-      },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }

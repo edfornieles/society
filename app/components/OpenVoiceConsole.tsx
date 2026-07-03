@@ -1318,15 +1318,26 @@ export function OpenVoiceConsole({
   const VAD_MIN_SPEECH_RMS = 0.012; // absolute floor for "this is speech"
   const VAD_NOISE_MULTIPLIER = 2.3; // speech threshold = max(floor, noise * this)
   const VAD_ONSET_MS = 120; // sustained speech before we START capturing (kills click/blip false starts)
-  const VAD_SILENCE_HOLD_MS = 700; // silence after speech before the turn is treated as finished. 650 clipped mid-sentence on natural pauses; 900 felt laggy ("not responding fast enough"); 700 is the compromise — enough to finish a thought, snappy enough to feel responsive. The real mishearing fix was the STT model+context-hint, not a longer hold.
+  // End-of-turn silence hold is ADAPTIVE: while an utterance is young the
+  // player is often mid-thought ("the most important thing is… um…"), so give
+  // them a generous window; once they've been talking a while, tighten it so
+  // the response feels snappy. A fixed 700ms cut people off early; a fixed
+  // 900ms felt laggy — splitting by utterance age serves both.
+  const VAD_SILENCE_HOLD_EARLY_MS = 1050; // utterance younger than the threshold below
+  const VAD_SILENCE_HOLD_MS = 800; // established utterance
+  const VAD_EARLY_UTTERANCE_MS = 3000; // "young" cutoff for the above
   const VAD_MAX_RECORD_MS = 20000;
   // Barge-in (talking over the model) needs a HIGHER bar than normal onset:
   // the model's own voice leaks into the mic even with echo cancellation, so
   // we require louder + longer sustained speech to interrupt — otherwise the
   // model would constantly cut itself off.
-  const VAD_BARGE_MIN_RMS = 0.05;
-  const VAD_BARGE_MULTIPLIER = 4;
-  const VAD_BARGE_MS = 250;
+  // Barge-in tuned for real-conversation interruption (unmute.sh feel): with
+  // echoCancellation stripping the model's own voice from the mic, the player
+  // shouldn't have to SHOUT to interrupt — normal speaking volume held briefly
+  // is enough. (Old values 0.05/4×/250ms required a raised voice for ¼s.)
+  const VAD_BARGE_MIN_RMS = 0.022;
+  const VAD_BARGE_MULTIPLIER = 3;
+  const VAD_BARGE_MS = 160;
 
   /** Open the mic once and keep it live for the whole session, then start the
    *  single continuous VAD loop. Called on Start (a real user gesture, so the
@@ -1544,6 +1555,9 @@ export function OpenVoiceConsole({
           }
           const silenceElapsed = silenceSinceRef.current ? now - silenceSinceRef.current : 0;
           const totalElapsed = now - (captureStartedAtRef.current ?? now);
+          // Adaptive hold: generous while the utterance is young (mid-thought
+          // pauses), tighter once established (snappy turn-taking).
+          const holdMs = totalElapsed < VAD_EARLY_UTTERANCE_MS ? VAD_SILENCE_HOLD_EARLY_MS : VAD_SILENCE_HOLD_MS;
           // Live envelope trace (throttled ~150ms) — shows RMS vs the threshold
           // it must clear to count as speech, so a quiet stretch that is about
           // to trip the silence timer is visible before the cutoff fires.
@@ -1553,10 +1567,10 @@ export function OpenVoiceConsole({
             console.log(
               `[VAD] rec rms=${rms.toFixed(4)} thr=${speechThreshold.toFixed(4)} floor=${noiseFloorRef.current.toFixed(4)} ${
                 isSpeech ? "SPEECH" : "quiet"
-              } silence=${silenceElapsed}ms/${VAD_SILENCE_HOLD_MS} total=${(totalElapsed / 1000).toFixed(1)}s`
+              } silence=${silenceElapsed}ms/${holdMs} total=${(totalElapsed / 1000).toFixed(1)}s`
             );
           }
-          const hitSilence = hasSpokenRef.current && silenceElapsed >= VAD_SILENCE_HOLD_MS;
+          const hitSilence = hasSpokenRef.current && silenceElapsed >= holdMs;
           const hitMax = totalElapsed >= VAD_MAX_RECORD_MS;
           if (hitSilence || hitMax) {
             if (vadDebug()) {
@@ -1636,7 +1650,7 @@ export function OpenVoiceConsole({
         `[VAD] ▶️ BEGIN capture — floor=${noiseFloorRef.current.toFixed(4)} speechThr=${Math.max(
           VAD_MIN_SPEECH_RMS,
           noiseFloorRef.current * VAD_NOISE_MULTIPLIER
-        ).toFixed(4)} holdMs=${VAD_SILENCE_HOLD_MS}`
+        ).toFixed(4)} holdMs=${VAD_SILENCE_HOLD_EARLY_MS}(early)/${VAD_SILENCE_HOLD_MS}`
       );
     }
   };

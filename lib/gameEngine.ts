@@ -40,6 +40,15 @@ const LEAK_LINE_PATTERNS: RegExp[] = [
  * mangling a legitimate multi-line reply.
  */
 export function sanitizeModelReply(text: string): string {
+  // Strip roleplay asterisks. A clause-like *stage direction* ("*ignores the
+  // comment, stays in fiction*") is removed entirely; short *emphasis* ("*Art*")
+  // keeps the word without the asterisks. Both would otherwise be spoken aloud
+  // by TTS. DeepSeek (a chat model that also does RP) emits these occasionally.
+  text = text.replace(/\*([^*\n]{0,160})\*/g, (_m, inner: string) => {
+    const t = inner.trim();
+    if (!t) return "";
+    return t.split(/\s+/).length >= 3 || /,/.test(t) ? "" : t;
+  });
   const kept = text
     .split("\n")
     .filter((raw) => {

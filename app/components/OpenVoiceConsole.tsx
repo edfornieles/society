@@ -1322,6 +1322,15 @@ export function OpenVoiceConsole({
   const VAD_CALIBRATION_MS = 400;
   const VAD_MIN_SPEECH_RMS = 0.012; // absolute floor for "this is speech"
   const VAD_NOISE_MULTIPLIER = 2.3; // speech threshold = max(floor, noise * this)
+  // Robustness against "I spoke but it says waiting": if calibration happens
+  // to sample a noisy moment, the floor (and thus the speech threshold) can
+  // land so high that normal speech never clears it. Two guards: never let the
+  // measured floor exceed VAD_MAX_NOISE_FLOOR (a floor above this means we
+  // sampled speech/noise, not the room), and treat anything above the absolute
+  // VAD_ABSOLUTE_SPEECH_RMS as speech no matter what the calibrated threshold
+  // is (normal talking peaks ~0.1; clear ambient noise rarely exceeds ~0.06).
+  const VAD_MAX_NOISE_FLOOR = 0.03;
+  const VAD_ABSOLUTE_SPEECH_RMS = 0.065;
   const VAD_ONSET_MS = 120; // sustained speech before we START capturing (kills click/blip false starts)
   // End-of-turn silence hold is ADAPTIVE: while an utterance is young the
   // player is often mid-thought ("the most important thing is… um…"), so give
@@ -1540,7 +1549,10 @@ export function OpenVoiceConsole({
         if (now - (calibrationStartRef.current ?? now) >= VAD_CALIBRATION_MS) {
           const s = calibrationSamplesRef.current;
           const avg = s.length ? s.reduce((x, y) => x + y, 0) / s.length : VAD_MIN_SPEECH_RMS;
-          noiseFloorRef.current = avg;
+          // Cap the floor so a noisy calibration moment can't push the speech
+          // threshold above normal talking level (the "I spoke but it's still
+          // waiting" failure).
+          noiseFloorRef.current = Math.min(avg, VAD_MAX_NOISE_FLOOR);
           calibrationDoneRef.current = true;
           if (vadDebug()) {
             // eslint-disable-next-line no-console
@@ -1555,7 +1567,10 @@ export function OpenVoiceConsole({
       } else {
         const speechThreshold = Math.max(VAD_MIN_SPEECH_RMS, noiseFloorRef.current * VAD_NOISE_MULTIPLIER);
         const bargeThreshold = Math.max(VAD_BARGE_MIN_RMS, noiseFloorRef.current * VAD_BARGE_MULTIPLIER);
-        const isSpeech = rms > speechThreshold;
+        // Clear speech counts even if the calibrated threshold somehow sits
+        // above it — the absolute-floor override is the safety net for a
+        // mis-calibrated (too-high) floor.
+        const isSpeech = rms > speechThreshold || rms > VAD_ABSOLUTE_SPEECH_RMS;
 
         if (recordingRef.current) {
           // Actively capturing the user's utterance — watch for end-of-turn.

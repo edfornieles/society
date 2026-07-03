@@ -45,6 +45,41 @@ const DEFAULT_64BIT_STYLE_GUIDE =
 const GREETING_TEXT =
   "Hi — I'm your Society co-creator; we're playing the Society worldbuilding game together.\n\nWhat's the most important thing in this society? Everything else will follow from it.";
 
+/** Encode mono Float32 PCM chunks as a 16-bit WAV blob (what /api/transcribe
+ *  uploads). Raw PCM lets capture include pre-roll audio from BEFORE the VAD
+ *  triggered — impossible with MediaRecorder, which only records from start(). */
+function encodeWavFromPcm(chunks: Float32Array[], sampleRate: number): Blob {
+  let len = 0;
+  for (const c of chunks) len += c.length;
+  const buf = new ArrayBuffer(44 + len * 2);
+  const dv = new DataView(buf);
+  const writeStr = (o: number, s: string) => {
+    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  dv.setUint32(4, 36 + len * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, 1, true); // mono
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * 2, true);
+  dv.setUint16(32, 2, true);
+  dv.setUint16(34, 16, true);
+  writeStr(36, "data");
+  dv.setUint32(40, len * 2, true);
+  let o = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      dv.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      o += 2;
+    }
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
 /** Split into sentence-ish chunks for pipelined TTS (see speak() below). */
 function splitIntoSentences(text: string): string[] {
   const trimmed = text.trim();
@@ -146,13 +181,15 @@ export function OpenVoiceConsole({
   const [micError, setMicError] = useState("");
   const [ttsError, setTtsError] = useState("");
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunksRef = useRef<Blob[]>([]);
-  // The actual container the browser recorded in. Safari's MediaRecorder emits
-  // MP4/AAC, not WebM — sending that blob mislabeled as "audio/webm" makes
-  // Whisper reject the whole file ("Transcription failed"). We capture the
-  // recorder's real mimeType and pass a matching blob type + filename instead.
-  const captureMimeRef = useRef<string>("audio/webm");
+  // Continuous raw-PCM capture (replaces MediaRecorder). The tap runs the whole
+  // session; while idle it keeps only a ~400ms rolling pre-roll, and during a
+  // turn it accumulates everything. This is what preserves the FIRST syllable:
+  // the VAD needs ~120ms of sustained speech before it triggers, and a recorder
+  // started at that moment amputated every word's head ("robotics" → "botox").
+  const pcmChunksRef = useRef<Float32Array[]>([]);
+  const pcmProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const pcmSilentGainRef = useRef<GainNode | null>(null);
+  const pcmSampleRateRef = useRef<number>(0);
   const micStreamRef = useRef<MediaStream | null>(null);
   // One AudioContext shared by mic-VAD analysis AND TTS-playback analysis,
   // created/unlocked on the Start button click (the one guaranteed direct
@@ -160,10 +197,9 @@ export function OpenVoiceConsole({
   // later with no gesture of its own — which is what every auto-triggered
   // recording after that first click would be — can be created "suspended"
   // in a lot of browsers (Safari especially), and a suspended context's
-  // whole node graph, analyser included, never sees a single real sample:
-  // MediaRecorder still captures real audio underneath, so this looks
-  // exactly like "it can't hear me" rather than an outright error, not like
-  // silence being genuinely recorded.
+  // whole node graph — analyser AND the PCM capture tap — never sees a
+  // single real sample, which looks exactly like "it can't hear me" rather
+  // than an outright error.
   const sharedAudioContextRef = useRef<AudioContext | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -1314,6 +1350,27 @@ export function OpenVoiceConsole({
       source.connect(analyser);
       micSourceRef.current = source;
       analyserRef.current = analyser;
+      // Continuous PCM tap with rolling pre-roll (see pcmChunksRef). The
+      // processor must be connected toward the destination to fire in all
+      // browsers — via a zero-gain node so the mic is never audible.
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      const silent = ctx.createGain();
+      silent.gain.value = 0;
+      source.connect(processor);
+      processor.connect(silent);
+      silent.connect(ctx.destination);
+      pcmSampleRateRef.current = ctx.sampleRate;
+      const prerollChunks = Math.max(2, Math.ceil((ctx.sampleRate * 0.4) / 4096));
+      pcmChunksRef.current = [];
+      processor.onaudioprocess = (e) => {
+        pcmChunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        if (!recordingRef.current) {
+          const extra = pcmChunksRef.current.length - prerollChunks;
+          if (extra > 0) pcmChunksRef.current.splice(0, extra);
+        }
+      };
+      pcmProcessorRef.current = processor;
+      pcmSilentGainRef.current = silent;
       // After system sleep or an input-device switch the OS kills the capture
       // track — without this handler the VAD loop keeps reading zeros forever
       // while showing "Waiting for you to speak". Reopen the mic immediately.
@@ -1342,14 +1399,11 @@ export function OpenVoiceConsole({
       cancelAnimationFrame(monitorRafRef.current);
       monitorRafRef.current = null;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      try {
-        mediaRecorderRef.current.stop();
-      } catch {
-        // ignore
-      }
-    }
-    mediaRecorderRef.current = null;
+    pcmProcessorRef.current?.disconnect();
+    pcmProcessorRef.current = null;
+    pcmSilentGainRef.current?.disconnect();
+    pcmSilentGainRef.current = null;
+    pcmChunksRef.current = [];
     micSourceRef.current?.disconnect();
     micSourceRef.current = null;
     analyserRef.current = null;
@@ -1565,25 +1619,13 @@ export function OpenVoiceConsole({
     monitorRafRef.current = requestAnimationFrame(tick);
   };
 
-  /** Start recording a user utterance on the already-open persistent stream. */
+  /** Start recording a user utterance. The continuous PCM tap (see openMic)
+   *  already holds the last ~400ms — the syllable spoken BEFORE the VAD
+   *  confirmed this is speech — so "starting" is just flipping the recording
+   *  flag, which stops the rolling buffer from being trimmed. */
   const beginCapture = (now: number) => {
     if (recordingRef.current) return;
-    const stream = micStreamRef.current;
-    if (!stream) return;
-    recordedChunksRef.current = [];
-    // Prefer WebM/Opus, but fall back to whatever the browser supports —
-    // Safari only does MP4/AAC. Whichever we pick, remember the REAL container
-    // so the blob + filename we send to Whisper match it.
-    const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
-    const chosen = preferred.find((t) => MediaRecorder.isTypeSupported(t)) || "";
-    const recorder = new MediaRecorder(stream, chosen ? { mimeType: chosen } : undefined);
-    captureMimeRef.current = recorder.mimeType || chosen || "audio/webm";
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-    };
-    recorder.onstop = () => void transcribeRecording();
-    mediaRecorderRef.current = recorder;
-    recorder.start();
+    if (!micStreamRef.current || !pcmProcessorRef.current) return;
     captureStartedAtRef.current = now;
     hasSpokenRef.current = true; // we only get here because speech was detected
     silenceSinceRef.current = null;
@@ -1602,32 +1644,23 @@ export function OpenVoiceConsole({
   const endCapture = () => {
     if (!recordingRef.current) return;
     setRecordingSync(false);
-    const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop(); // fires onstop → transcribeRecording
-    }
+    // Take pre-roll + utterance out of the tap and reset it to rolling mode.
+    const chunks = pcmChunksRef.current;
+    pcmChunksRef.current = [];
+    const sampleRate = pcmSampleRateRef.current;
+    if (!chunks.length || !sampleRate) return;
+    void transcribeRecording(encodeWavFromPcm(chunks, sampleRate));
   };
 
   // The mic never closes mid-session, so dead-end paths (empty/junk/failed
   // transcription) just return — the always-on monitor loop is already
   // listening for the next utterance. No manual restart needed.
-  const transcribeRecording = async () => {
-    const mime = captureMimeRef.current || "audio/webm";
-    const baseMime = mime.split(";")[0]; // strip ";codecs=..." for the blob type
-    const ext = baseMime.includes("mp4")
-      ? "mp4"
-      : baseMime.includes("ogg")
-      ? "ogg"
-      : baseMime.includes("mpeg")
-      ? "mp3"
-      : "webm";
-    const blob = new Blob(recordedChunksRef.current, { type: baseMime });
-    recordedChunksRef.current = [];
-    if (blob.size === 0) return;
+  const transcribeRecording = async (blob: Blob) => {
+    if (blob.size <= 44) return; // WAV header only — no audio
     setTranscribing(true);
     try {
       const form = new FormData();
-      form.set("audio", blob, `speech.${ext}`);
+      form.set("audio", blob, "speech.wav");
       // Bias transcription toward THIS society's vocabulary so unusual answers
       // (proper nouns, "beach culture", faction names) aren't misheard. The
       // core value + the agent's last question are the words the player is most
@@ -1669,7 +1702,7 @@ export function OpenVoiceConsole({
       if (monitorRafRef.current !== null) cancelAnimationFrame(monitorRafRef.current);
       if (waveRafRef.current !== null) cancelAnimationFrame(waveRafRef.current);
       sharedAudioContextRef.current?.close().catch(() => {});
-      mediaRecorderRef.current?.stream?.getTracks().forEach((t) => t.stop());
+      pcmProcessorRef.current?.disconnect();
       micStreamRef.current?.getTracks().forEach((t) => t.stop());
       playbackAudioRef.current?.pause();
     };

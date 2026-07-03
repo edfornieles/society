@@ -50,8 +50,13 @@ export function sanitizeModelReply(text: string): string {
       // truncated/garbled generation artifact, not a real reply.
       if (/^'t\b/i.test(line)) return false;
       return true;
-    });
-  return kept.join("\n").trim();
+    })
+    // Strip stray enumeration markers ("1. ", "2) ") the model sometimes echoes
+    // from the three-beat instructions — the CONTENT is real (unlike a leaked
+    // bullet line), it's just the number that would be read aloud. Remove the
+    // marker, keep the sentence, and let the beats read as flowing speech.
+    .map((raw) => raw.replace(/^\s*\d{1,2}[.)]\s+/, ""));
+  return kept.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /** True once sanitized text still looks like a usable in-character reply. */
@@ -256,12 +261,9 @@ ${canonBlock}Core value: "${core}". Tone dial (${playfulness}/3): ${playfulnessT
 
 Voice: a sharp, curious anthropologist fascinated by this culture, not a friendly assistant. Speak directly to the player, in-fiction, no meta-commentary. Never refer to "the player" in third person; never restate "${core}" as if reminding them it's the premise.
 
-This turn, do these three beats IN ORDER:
-1. MAKE SENSE of what the player just said — show you actually understood it by reflecting it back in your own words and drawing out what it implies for this society. This is the most important beat: never skip straight to a question, and never just parrot their words back. If what they said is ambiguous, interpret it charitably and say how you're taking it.
-2. THEN, optionally, add ONE small concrete detail of your own that follows naturally from what they said and the canon above — a light "yes, and" that enriches their idea without overriding it. Keep the player as the primary author: don't invent a whole institution or contradict them; a single vivid, logical consequence is plenty. Skip this beat if nothing genuinely follows.
-3. THEN ask ONE open question that pushes into a part of the society the conversation hasn't covered yet (virtue/shame, an ordinary day, failure, conflict/defense, death, status, justice, upbringing, economy).
+This turn flows in three moves, delivered as ONE natural spoken reply — never as a numbered or bulleted list, never with labels or headings, just the words you'd actually say out loud. First, make sense of what the player just said: reflect it back in your own words and draw out what it implies for this society (this matters most — never skip straight to a question, never just parrot them; if it's ambiguous, interpret it charitably and say how you're taking it). Then you may add ONE small concrete detail of your own that follows naturally from what they said and the canon above — a light "yes, and" that enriches their idea without overriding or contradicting it; a single vivid consequence is plenty, and skip it if nothing genuinely follows. Then ask ONE open question that pushes into a part of the society not covered yet (virtue/shame, an ordinary day, failure, conflict/defense, death, status, justice, upbringing, economy).
 
-Stay strictly consistent with the established canon above; never contradict it. The player is building this world from outside it, not living inside it — never ask what they've "seen" or "witnessed"; ask about the system instead. Keep it to 2-4 sentences, speakable aloud. No compliments, hype, or thanks ("great", "fascinating", "I love that").`;
+Stay strictly consistent with the established canon above; never contradict it. The player is building this world from outside it, not living inside it — never ask what they've "seen" or "witnessed"; ask about the system instead. Keep it to 2-4 sentences of flowing speech, no lists or numbering. No compliments, hype, or thanks ("great", "fascinating", "I love that").`;
 }
 
 export function buildCoreValueAcceptedInstructions(coreLabel: string, playfulness: Playfulness = 1): string {

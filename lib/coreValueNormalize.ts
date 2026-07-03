@@ -10,8 +10,12 @@
 // "snakes are the most important thing" / "make snakes the most important
 // thing in this society". This regex eats the entire boilerplate clause
 // including the surrounding copula so we land cleanly on the topic noun.
+// "this/the/our" is OPTIONAL — Whisper often drops it, so "the most important
+// thing in society is games" must be stripped just like "...in this society...".
+// The trailing "in ... society" is itself optional too, so a bare "the most
+// important thing is games" is also caught.
 const BOILERPLATE =
-  /\s*(?:\b(?:is|are|was|were|will\s+be|would\s+be)\s+)?the\s+most\s+important\s+thing\s+in\s+(?:this|the|our)\s+society(?:\s+(?:is|are|was|were|will\s+be|would\s+be))?\b/gi;
+  /\s*(?:\b(?:is|are|was|were|will\s+be|would\s+be)\s+)?the\s+most\s+important\s+thing(?:\s+in\s+(?:(?:this|the|our)\s+)?society)?(?:\s+(?:is|are|was|were|will\s+be|would\s+be))?\b/gi;
 
 const HEDGE = /^(i think|i believe|i guess|i suppose|i'd say|i would say|maybe|perhaps|well|um|uh|er|hmm|so|like|okay|ok|alright|right|yeah|yep|yup|yes|sure|definitely|honestly|basically|actually|let'?s see|let me think)[,.!]?\s+/i;
 
@@ -156,7 +160,12 @@ export function normalizeCoreValueUtterance(raw: string): string {
 export function extractCoreTopicPhrase(stored: string): string {
   const t = stored.replace(/\s+/g, " ").trim();
   if (!t) return "";
-  const m = t.match(/^The most important thing in this society is (.+?)\.?$/i);
-  if (m) return m[1].replace(/\.$/, "").trim();
+  // Canonical form, plus legacy/garbled forms where the boilerplate wasn't
+  // stripped ("the most important thing in society is games", no this/the/our)
+  // — pull out just the topic so the value never displays doubled.
+  const m = t.match(
+    /^the most important thing(?:\s+in\s+(?:this\s+|the\s+|our\s+)?society)?\s+(?:is|are)\s+(.+?)\.?$/i
+  );
+  if (m?.[1]) return m[1].replace(/\.$/, "").trim();
   return t.replace(/\.$/, "").trim();
 }

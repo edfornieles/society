@@ -106,7 +106,10 @@ export function isWeakCoreValueLabel(label: string): boolean {
   if (FILLER_ONLY_LABEL.test(t)) return true;
   if (BARE_VERB_LABEL.test(t)) return true;
   if (FUNCTION_WORD_LABEL.test(t)) return true;
-  if (/^the most important thing in (this|the|our) society/.test(t)) return true;
+  // Any label still opening with the scripted question is a failed strip
+  // (e.g. "the most important thing in society is games" with no this/the/our)
+  // — reject so the caller re-asks instead of storing the doubled boilerplate.
+  if (/^the most important thing\b/.test(t)) return true;
   if (/^what(?:'s| is) the most important thing/.test(t)) return true;
   if (isSpuriousUserTranscript(t)) return true;
   return false;

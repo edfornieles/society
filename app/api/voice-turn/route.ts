@@ -33,7 +33,12 @@ export async function POST(req: Request) {
       apiKey: process.env.OPENROUTER_API_KEY,
       baseURL: "https://openrouter.ai/api/v1",
     });
-    const model = process.env.OPENROUTER_MODEL?.trim() || "thedrummer/cydonia-24b-v4.1";
+    // DeepSeek (default 2026-07-03): coherent like unmute.sh's Mistral-Small
+    // while keeping the dark latitude Cydonia had. The prior Cydonia-24B (an
+    // uncensored roleplay fine-tune) rambled, garbled tokens, and asked
+    // multiple questions per turn — a bake-off through the identical prompts
+    // showed DeepSeek fixed all of it. Override with OPENROUTER_MODEL.
+    const model = process.env.OPENROUTER_MODEL?.trim() || "deepseek/deepseek-chat";
 
     // Real turn-by-turn history (instead of re-deriving "what's been said" into
     // the system prompt each call) lets the model track the world the way any

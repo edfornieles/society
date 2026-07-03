@@ -98,6 +98,30 @@ export function isWeakCoreValueLabel(label: string): boolean {
   return false;
 }
 
+// A greeting or a question/remark aimed AT the co-creator ("hey, are you
+// okay?", "can you hear me?", "how are you") is conversational chatter, never
+// the society's core value — yet it survives isWeakCoreValueLabel (which only
+// catches single filler words). Accepting one made "HEY, ARE YOU OKAY?" the
+// society's most important thing. Detected on the RAW utterance so the phrasing
+// (second-person address, question form) is still visible.
+const GREETING_ONLY =
+  /^(hey|hi+|hello+|yo|hiya|howdy|sup|heya|good (morning|afternoon|evening|day))\b[\s,!.?-]*(there|everyone|everybody|folks|guys|friend|friends|again)?[\s,!.?-]*$/i;
+const AGENT_DIRECTED =
+  /\b(are|is)\s+you\b|\bare\s+you\s+(ok|okay|there|alright|listening|ready|real|human|a\s+robot|an?\s+ai|hearing|still\s+there)\b|\byou\s+(ok|okay|there|alright|listening)\b|\bhow\s+are\s+you\b|\bhow'?s\s+it\s+going\b|\bcan\s+you\s+(hear|understand|see|help)\b|\bdo\s+you\s+(understand|hear|copy|get\s+(it|this)|know|think|read\s+me)\b|\bwhat\s+do\s+you\s+(think|mean|reckon)\b|\bis\s+(this|it)\s+(thing\s+)?(on|working|recording|live|listening|plugged)\b|\bare\s+we\s+(live|recording|on|good)\b/i;
+
+/** True when an utterance is a greeting or a remark/question aimed at the
+ *  co-creator rather than a candidate society value — must NOT be accepted or
+ *  stored as the core value; re-ask instead. */
+export function isNonCoreValueUtterance(raw: string): boolean {
+  const t = raw.replace(/\s+/g, " ").trim();
+  if (!t) return true;
+  if (GREETING_ONLY.test(t)) return true;
+  if (AGENT_DIRECTED.test(t)) return true;
+  // A short second-person question ("...you...?") is essentially never a value.
+  if (/\byou\b/i.test(t) && /\?\s*$/.test(t) && t.split(/\s+/).length <= 8) return true;
+  return false;
+}
+
 /**
  * Detect an explicit "you misheard the core value — change it to X" correction
  * and return the corrected topic phrase (or "" if this isn't a correction).

@@ -12,6 +12,7 @@ import { withBase } from "@/lib/basePath";
 import type { GeneratedImage } from "@/lib/generatedImage";
 import {
   isWeakCoreValueLabel,
+  isNonCoreValueUtterance,
   buildClarifyRepeatInstructions,
   hasConcreteFirstImageAnchor,
   buildGuidedTurnInstructions,
@@ -1778,6 +1779,17 @@ export function OpenVoiceConsole({
     pushHistory("user", transcript);
     setSendingSync(true);
     try {
+      // Core value is IMMUTABLE once set. If one already exists, onboarding is
+      // over no matter what onboardingPhaseRef says — this stops a stray
+      // utterance (an aside, a resumed session, a phase glitch) from re-opening
+      // core-value setting and overwriting the established value.
+      const establishedCore = extractCoreTopicPhrase(
+        String(bibleRef.current.canon.coreValues?.[0] ?? "")
+      ).trim();
+      if (onboardingPhaseRef.current === "pre_core" && establishedCore && !isWeakCoreValueLabel(establishedCore)) {
+        onboardingPhaseRef.current = "done";
+      }
+
       if (onboardingPhaseRef.current === "pre_core") {
         if (WANTS_RULES_PATTERN.test(transcript)) {
           const reply = await respondAndSpeak(buildRulesThenCoreInstructions());
@@ -1787,7 +1799,9 @@ export function OpenVoiceConsole({
         }
         const coreValue = normalizeCoreValueUtterance(transcript);
         const coreLabel = extractCoreTopicPhrase(coreValue);
-        if (isWeakCoreValueLabel(coreLabel)) {
+        // A greeting or a remark aimed at the co-creator ("hey, are you okay?")
+        // is not a society value — re-ask instead of enshrining it as canon.
+        if (isNonCoreValueUtterance(transcript) || isWeakCoreValueLabel(coreLabel)) {
           const reply = await respondAndSpeak(buildClarifyRepeatInstructions(transcript));
           addLine("assistant", reply);
           pushHistory("assistant", reply);

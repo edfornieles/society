@@ -172,6 +172,9 @@ export function OpenVoiceConsole({
   // speaks, so the user can talk over it). monitorRafRef drives the single
   // continuous VAD loop; the old per-utterance open/close is gone.
   const monitorRafRef = useRef<number | null>(null);
+  // Guards reacquireMic against overlapping runs (track.onended firing while a
+  // reacquire is already in flight would double-open the mic).
+  const micReacquiringRef = useRef(false);
   const hasSpokenRef = useRef(false);
   const silenceSinceRef = useRef<number | null>(null);
   const speechOnsetSinceRef = useRef<number | null>(null);
@@ -1311,6 +1314,14 @@ export function OpenVoiceConsole({
       source.connect(analyser);
       micSourceRef.current = source;
       analyserRef.current = analyser;
+      // After system sleep or an input-device switch the OS kills the capture
+      // track — without this handler the VAD loop keeps reading zeros forever
+      // while showing "Waiting for you to speak". Reopen the mic immediately.
+      stream.getAudioTracks().forEach((t) => {
+        t.onended = () => {
+          void reacquireMic();
+        };
+      });
       // Reset detection state and recalibrate the noise floor for this session.
       noiseFloorRef.current = VAD_MIN_SPEECH_RMS;
       calibrationSamplesRef.current = [];
@@ -1342,10 +1353,32 @@ export function OpenVoiceConsole({
     micSourceRef.current?.disconnect();
     micSourceRef.current = null;
     analyserRef.current = null;
-    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current?.getTracks().forEach((t) => {
+      t.onended = null; // deliberate close — don't let the handler "recover" it
+      t.stop();
+    });
     micStreamRef.current = null;
     setRecordingSync(false);
     stopWaveformLoop();
+  };
+
+  /** Tear down and reopen a dead mic capture. The OS can kill or permanently
+   *  mute the track (sleep/wake, AirPods connecting, input-device switch)
+   *  without any error surfacing — the session then looks alive but hears
+   *  nothing. Called from track.onended and the monitor loop's health check. */
+  const reacquireMic = async (): Promise<void> => {
+    if (micReacquiringRef.current) return;
+    if (!activeRef.current) return; // session was stopped; nothing to heal
+    micReacquiringRef.current = true;
+    try {
+      closeMic();
+      await openMic();
+      if (micStreamRef.current) {
+        addLine("sys", "Mic connection was lost (sleep or device switch) — reconnected.");
+      }
+    } finally {
+      micReacquiringRef.current = false;
+    }
   };
 
   /** The single always-on loop. Reads the mic every frame and drives the whole
@@ -1365,6 +1398,9 @@ export function OpenVoiceConsole({
     const vadDebug = () =>
       typeof window !== "undefined" &&
       ((window as any).__VAD_DEBUG ?? process.env.NODE_ENV !== "production");
+    // Mic health check state (see the dead-track guard at the top of tick).
+    let lastTrackCheck = 0;
+    let trackMutedSince: number | null = null;
 
     const tick = () => {
       const a = analyserRef.current;
@@ -1377,6 +1413,40 @@ export function OpenVoiceConsole({
       }
       const rms = Math.sqrt(sumSquares / timeBuffer.length);
       const now = Date.now();
+
+      // Dead-mic self-healing (~1s cadence): after sleep/wake or an input-
+      // device switch the capture track can end — or stick muted — without any
+      // event we handle reliably, leaving this loop reading zeros forever
+      // while the UI says "Waiting for you to speak". Detect it and reopen.
+      if (now - lastTrackCheck >= 1000) {
+        lastTrackCheck = now;
+        const track = micStreamRef.current?.getAudioTracks()[0];
+        if (track) {
+          if (track.readyState === "ended") {
+            if (vadDebug()) {
+              // eslint-disable-next-line no-console
+              console.log("[VAD] 🔌 mic track ended — reacquiring");
+            }
+            void reacquireMic();
+            return; // don't schedule another frame; reacquireMic starts a fresh loop
+          }
+          if (track.muted) {
+            if (trackMutedSince === null) {
+              trackMutedSince = now;
+            } else if (now - trackMutedSince >= 2000) {
+              trackMutedSince = null;
+              if (vadDebug()) {
+                // eslint-disable-next-line no-console
+                console.log("[VAD] 🔇 mic track stuck muted — reacquiring");
+              }
+              void reacquireMic();
+              return;
+            }
+          } else {
+            trackMutedSince = null;
+          }
+        }
+      }
 
       // One-time noise-floor calibration right after the mic opens. Never
       // calibrate over the model's own voice (e.g. the greeting playing before

@@ -23,7 +23,10 @@ export function GameShell() {
   // button can invoke it directly inside this React click (reliable activation).
   const newGameRef = useRef<(() => void) | null>(null);
 
-  const [playfulness, setPlayfulness] = useState<Playfulness>(2);
+  // Default 1 (BALANCED): grounded, curious, real edge only when the player
+  // opens the door — NOT the old default 2 (EDGY), which made institutions
+  // "default to cruel" and turned neutral premises like "socialism" dystopian.
+  const [playfulness, setPlayfulness] = useState<Playfulness>(1);
   const [autoImages, setAutoImages] = useState(true);
   // Back to every turn per request — per-image cost is already controlled via
   // gpt-image-1-mini at "medium" quality (~8-12x cheaper than the original

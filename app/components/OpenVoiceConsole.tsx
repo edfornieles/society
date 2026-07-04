@@ -233,6 +233,11 @@ export function OpenVoiceConsole({
   // generating (and paying for) a reply the user just interrupted.
   const streamAbortRef = useRef<AbortController | null>(null);
   const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Streaming TTS: a stop() for the in-flight streamed sentence (aborts the
+  // fetch + stops scheduled Web Audio sources), and the shared playback cursor
+  // so consecutive sentences schedule gaplessly on the AudioContext clock.
+  const streamStopRef = useRef<(() => void) | null>(null);
+  const streamPlayheadRef = useRef<number>(0);
   const waveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const waveRafRef = useRef<number | null>(null);
   const startModeRef = useRef<"new" | "continue" | "recap">("new");
@@ -589,6 +594,140 @@ export function OpenVoiceConsole({
     return donePromise;
   };
 
+  /**
+   * Low-latency streaming playback: fetch the TTS WAV as a STREAM and start
+   * playing PCM the instant the first ~384ms chunk arrives (vs waiting ~900ms+
+   * for the whole clip). Pocket-TTS streams 16-bit mono PCM; we parse the WAV
+   * header once, then convert each network chunk to an AudioBuffer and schedule
+   * it back-to-back on the shared AudioContext clock. Resolves when playback
+   * finishes. Throws on any setup failure so the caller can fall back to the
+   * buffered playBlob path (keeping the voice robust).
+   */
+  const playTtsStream = async (text: string, token: number): Promise<void> => {
+    if (token !== speakTokenRef.current) return;
+    const ctx = await ensureAudioContext();
+    const abort = new AbortController();
+    const sources: AudioBufferSourceNode[] = [];
+    let stopped = false;
+    const stop = () => {
+      stopped = true;
+      try { abort.abort(); } catch {}
+      for (const s of sources) {
+        try { s.stop(); } catch {}
+        try { s.disconnect(); } catch {}
+      }
+    };
+    streamStopRef.current = stop;
+
+    const r = await fetch(withBase("/api/tts"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: abort.signal,
+    });
+    if (!r.ok || !r.body) {
+      if (streamStopRef.current === stop) streamStopRef.current = null;
+      throw new Error(`TTS stream failed (${r.status})`);
+    }
+
+    // Waveform reactivity: all scheduled sources feed a gain → analyser → output.
+    const gain = ctx.createGain();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    gain.connect(analyser);
+    analyser.connect(ctx.destination);
+    runWaveformLoop(analyser);
+    setTtsError("");
+
+    let sampleRate = 24000;
+    let pcmStarted = false;
+    let header = new Uint8Array(0);
+    let byteCarry = new Uint8Array(0); // holds a dangling odd byte across chunks
+    // schedule a hair ahead of "now" so the first buffer isn't dropped for
+    // being in the past; continue from the shared cursor for gapless sentences.
+    let cursor = Math.max(ctx.currentTime + 0.06, streamPlayheadRef.current);
+
+    const schedulePcm = (bytes: Uint8Array) => {
+      let combined = bytes;
+      if (byteCarry.length) {
+        combined = new Uint8Array(byteCarry.length + bytes.length);
+        combined.set(byteCarry);
+        combined.set(bytes, byteCarry.length);
+      }
+      const usable = combined.length - (combined.length % 2);
+      byteCarry = usable < combined.length ? combined.slice(usable) : new Uint8Array(0);
+      if (usable <= 0) return;
+      const dv = new DataView(combined.buffer, combined.byteOffset, usable);
+      const n = usable / 2;
+      const buf = ctx.createBuffer(1, n, sampleRate);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(gain);
+      const startAt = Math.max(ctx.currentTime, cursor);
+      try { src.start(startAt); } catch { return; }
+      cursor = startAt + buf.duration;
+      streamPlayheadRef.current = cursor;
+      sources.push(src);
+    };
+
+    // Parse RIFF/WAVE header to find the sample rate + start of PCM data.
+    const tryParseHeader = (): boolean => {
+      if (header.length < 44) return false;
+      const dv = new DataView(header.buffer, header.byteOffset, header.byteLength);
+      const tag = (o: number) => String.fromCharCode(header[o], header[o + 1], header[o + 2], header[o + 3]);
+      if (tag(0) !== "RIFF" || tag(8) !== "WAVE") return false;
+      let off = 12;
+      while (off + 8 <= header.length) {
+        const id = tag(off);
+        const size = dv.getUint32(off + 4, true);
+        if (id === "fmt ") sampleRate = dv.getUint32(off + 12, true) || 24000;
+        if (id === "data") {
+          const pcmStart = off + 8;
+          pcmStarted = true;
+          if (header.length > pcmStart) schedulePcm(header.slice(pcmStart));
+          return true;
+        }
+        off += 8 + size + (size % 2);
+      }
+      return false;
+    };
+
+    try {
+      const reader = r.body.getReader();
+      while (true) {
+        if (stopped || token !== speakTokenRef.current) { stop(); break; }
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.length === 0) continue;
+        if (pcmStarted) {
+          schedulePcm(value);
+        } else {
+          const merged = new Uint8Array(header.length + value.length);
+          merged.set(header);
+          merged.set(value, header.length);
+          header = merged;
+          tryParseHeader();
+        }
+      }
+      // Wait for the scheduled audio to actually finish (or be interrupted).
+      if (!stopped && token === speakTokenRef.current) {
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (stopped || token !== speakTokenRef.current || ctx.currentTime >= cursor) resolve();
+            else setTimeout(check, 40);
+          };
+          check();
+        });
+      }
+    } finally {
+      try { gain.disconnect(); } catch {}
+      if (streamStopRef.current === stop) streamStopRef.current = null;
+      stopWaveformLoop();
+    }
+  };
+
   /** Hard-stop whatever audio is currently playing. Critical for the
    *  single-voice invariant: bumping the speak token stops FUTURE sentences,
    *  but audio already handed to audio.play() runs to completion on its own —
@@ -606,6 +745,15 @@ export function OpenVoiceConsole({
         // ignore
       }
     }
+    // Stop any in-flight STREAMED sentence (aborts fetch + kills scheduled Web
+    // Audio sources) and reset the shared playback cursor for the next turn.
+    try {
+      streamStopRef.current?.();
+    } catch {
+      // ignore
+    }
+    streamStopRef.current = null;
+    streamPlayheadRef.current = 0;
     stopWaveformLoop();
   };
 
@@ -645,13 +793,15 @@ export function OpenVoiceConsole({
     setTtsError("");
     setSpeakingSync(true);
     try {
-      let nextFetch = fetchTtsBlob(sentences[0]);
       for (let i = 0; i < sentences.length; i++) {
         if (speakTokenRef.current !== myToken) break;
-        const blob = await nextFetch;
-        nextFetch = i + 1 < sentences.length ? fetchTtsBlob(sentences[i + 1]) : Promise.resolve(null);
-        if (speakTokenRef.current !== myToken) break;
-        if (blob) await playBlob(blob, myToken);
+        // Stream each sentence for low latency; fall back to buffered playback.
+        try {
+          await playTtsStream(sentences[i], myToken);
+        } catch {
+          const blob = await fetchTtsBlob(sentences[i]);
+          if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
+        }
       }
     } finally {
       // Only clear "speaking" if we're still the current turn. If we were
@@ -697,11 +847,16 @@ export function OpenVoiceConsole({
         setSendingSync(false);
         setSpeakingSync(true);
       }
-      const fetchPromise = fetchTtsBlob(clean); // starts generating immediately
       playChain = playChain.then(async () => {
         if (speakTokenRef.current !== myToken) return;
-        const blob = await fetchPromise;
-        if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
+        // Stream the sentence (first audio at ~384ms). Fall back to buffered
+        // playback if streaming setup fails, so a sentence is never lost.
+        try {
+          await playTtsStream(clean, myToken);
+        } catch {
+          const blob = await fetchTtsBlob(clean);
+          if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
+        }
       });
     };
 

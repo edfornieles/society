@@ -43,6 +43,19 @@ export async function POST(req: Request) {
         { status: 502 }
       );
     }
+    // Stream Pocket-TTS's chunked WAV straight through to the browser instead
+    // of buffering the whole clip — the client can start playing at the first
+    // ~384ms chunk rather than waiting ~900ms+ for the full render. Falls back
+    // to buffering only if there's no readable stream.
+    if (r.body) {
+      return new Response(r.body, {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/wav",
+          "Cache-Control": "no-cache, no-transform",
+        },
+      });
+    }
     const audio = await r.arrayBuffer();
     return new Response(audio, {
       status: 200,

@@ -1337,8 +1337,8 @@ export function OpenVoiceConsole({
   // them a generous window; once they've been talking a while, tighten it so
   // the response feels snappy. A fixed 700ms cut people off early; a fixed
   // 900ms felt laggy — splitting by utterance age serves both.
-  const VAD_SILENCE_HOLD_EARLY_MS = 900; // utterance younger than the threshold below
-  const VAD_SILENCE_HOLD_MS = 650; // established utterance
+  const VAD_SILENCE_HOLD_EARLY_MS = 1100; // utterance younger than the threshold below
+  const VAD_SILENCE_HOLD_MS = 800; // established utterance
   const VAD_EARLY_UTTERANCE_MS = 3000; // "young" cutoff for the above
   // Snappiness: fire transcription this early into trailing silence, in
   // PARALLEL with the (longer) end-of-turn hold, so the ~500ms STT round-trip
@@ -1365,6 +1365,13 @@ export function OpenVoiceConsole({
   const VAD_BARGE_MIN_RMS = 0.045;
   const VAD_BARGE_MULTIPLIER = 1.6;
   const VAD_BARGE_MS = 130;
+  // Hysteresis: STARTING a turn uses the strict speech threshold (avoids phantom
+  // starts), but once capturing, "still talking" uses a much LOWER bar so the
+  // quiet dips between words/syllables aren't mistaken for the end of the turn
+  // — the "it cut me off while I was still talking" failure. Only a real drop
+  // below this low bar (a genuine pause) starts the silence timer.
+  const VAD_MIN_CONTINUATION_RMS = 0.008;
+  const VAD_CONTINUATION_MULTIPLIER = 1.15;
 
   /** Open the mic once and keep it live for the whole session, then start the
    *  single continuous VAD loop. Called on Start (a real user gesture, so the
@@ -1577,10 +1584,14 @@ export function OpenVoiceConsole({
         // above it — the absolute-floor override is the safety net for a
         // mis-calibrated (too-high) floor.
         const isSpeech = rms > speechThreshold || rms > VAD_ABSOLUTE_SPEECH_RMS;
+        // Lower "still talking" bar (hysteresis) — used only while recording.
+        const stillSpeaking = rms > Math.max(VAD_MIN_CONTINUATION_RMS, noiseFloorRef.current * VAD_CONTINUATION_MULTIPLIER);
 
         if (recordingRef.current) {
           // Actively capturing the user's utterance — watch for end-of-turn.
-          if (isSpeech) {
+          // Use the LOW continuation bar so a quiet syllable doesn't look like a
+          // pause; only a real drop below it starts the end-of-turn silence timer.
+          if (stillSpeaking) {
             hasSpokenRef.current = true;
             silenceSinceRef.current = null;
             invalidateSpeculativeStt(); // a resumed word makes the pending transcript stale
@@ -1604,8 +1615,8 @@ export function OpenVoiceConsole({
             lastVadLog = now;
             // eslint-disable-next-line no-console
             console.log(
-              `[VAD] rec rms=${rms.toFixed(4)} thr=${speechThreshold.toFixed(4)} floor=${noiseFloorRef.current.toFixed(4)} ${
-                isSpeech ? "SPEECH" : "quiet"
+              `[VAD] rec rms=${rms.toFixed(4)} contThr=${Math.max(VAD_MIN_CONTINUATION_RMS, noiseFloorRef.current * VAD_CONTINUATION_MULTIPLIER).toFixed(4)} floor=${noiseFloorRef.current.toFixed(4)} ${
+                stillSpeaking ? "TALKING" : "quiet"
               } silence=${silenceElapsed}ms/${holdMs} total=${(totalElapsed / 1000).toFixed(1)}s`
             );
           }

@@ -63,7 +63,7 @@ export async function POST(req: Request) {
         // Conversational turns must stay SHORT for a real back-and-forth feel
         // (a 220-token reply is ~25s of speech = a monologue). The prompt asks
         // for ~30 words; this ceiling just stops a rambling model mid-flight.
-        max_tokens: 130,
+        max_tokens: 100,
         stream: true,
       });
       const encoder = new TextEncoder();
@@ -97,7 +97,7 @@ export async function POST(req: Request) {
         ? Math.min(1500, Math.floor(maxTokens as number))
         : json
         ? 900
-        : 130;
+        : 100;
     const completion = await client.chat.completions.create({
       model,
       messages,

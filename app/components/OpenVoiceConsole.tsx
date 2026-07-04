@@ -1356,9 +1356,15 @@ export function OpenVoiceConsole({
   // echoCancellation stripping the model's own voice from the mic, the player
   // shouldn't have to SHOUT to interrupt — normal speaking volume held briefly
   // is enough. (Old values 0.05/4×/250ms required a raised voice for ¼s.)
-  const VAD_BARGE_MIN_RMS = 0.022;
-  const VAD_BARGE_MULTIPLIER = 3;
-  const VAD_BARGE_MS = 160;
+  // Barge threshold is kept roughly CONSTANT (~0.045-0.05) rather than scaling
+  // steeply with the floor — the old floor×3 pushed it to ~0.09 (near-shouting)
+  // on noisier setups, so the player couldn't cut in. This sits comfortably
+  // above residual echo (the model's own voice after cancellation, ~0.02-0.04)
+  // but well below normal speech (~0.1). Headphones remove echo entirely and
+  // make this even more reliable.
+  const VAD_BARGE_MIN_RMS = 0.045;
+  const VAD_BARGE_MULTIPLIER = 1.6;
+  const VAD_BARGE_MS = 130;
 
   /** Open the mic once and keep it live for the whole session, then start the
    *  single continuous VAD loop. Called on Start (a real user gesture, so the
@@ -1617,7 +1623,17 @@ export function OpenVoiceConsole({
             endCapture();
           }
         } else if (speakingRef.current) {
-          // Model is talking — listen for the user barging in over it.
+          // Model is talking — listen for the user barging in over it. Trace the
+          // envelope so we can see the actual echo level vs the barge bar.
+          if (vadDebug() && now - lastVadLog >= 150) {
+            lastVadLog = now;
+            // eslint-disable-next-line no-console
+            console.log(
+              `[VAD] speaking rms=${rms.toFixed(4)} bargeThr=${bargeThreshold.toFixed(4)} floor=${noiseFloorRef.current.toFixed(4)} ${
+                rms > bargeThreshold ? "OVER-BAR (interrupting)" : "under"
+              }`
+            );
+          }
           if (rms > bargeThreshold) {
             if (bargeSinceRef.current === null) bargeSinceRef.current = now;
             if (now - bargeSinceRef.current >= VAD_BARGE_MS) {

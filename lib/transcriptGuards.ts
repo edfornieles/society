@@ -40,6 +40,12 @@ export function isSpuriousUserTranscript(text: string): boolean {
   // for the most common hallucinated phrases, not things a player would
   // actually say mid-game.
   if (/^(thanks?|thank you)\s+(for\s+watching|for\s+listening)[.!]?$/i.test(t)) return true;
+  // Bare "thank you" / "thanks" (with optional intensifier) is Whisper's single
+  // most common hallucination on silence/near-silence — and never a valid core
+  // value or worthwhile canon. Standalone only, so "thank you for the harvest"
+  // (a real answer) still passes.
+  if (/^(thank\s*you|thanks|thank\s*you\s+(so|very)\s+much|thanks\s+(so|very)\s+much|thank\s*you\s+again|many\s+thanks)[.!,]*$/i.test(lower)) return true;
+  if (/^you'?re\s+welcome[.!,]*$/i.test(lower)) return true;
   if (/\bplease\s+(subscribe|like\s+and\s+subscribe)\b/i.test(lower)) return true;
   if (/\bsee\s+you\s+(in\s+the\s+)?next\s+(video|time)\b/i.test(lower)) return true;
   if (/^(bye|goodbye)[.!]?$/i.test(t)) return true;

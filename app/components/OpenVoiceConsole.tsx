@@ -243,6 +243,10 @@ export function OpenVoiceConsole({
   const [speaking, setSpeaking] = useState(false);
   const [micError, setMicError] = useState("");
   const [ttsError, setTtsError] = useState("");
+  // True when this tab is running a build older than what's deployed. A subtle
+  // chat line was repeatedly missed (players kept reporting already-fixed
+  // bugs), so this drives an unmissable fixed banner with a one-click reload.
+  const [staleTab, setStaleTab] = useState(false);
 
   // Continuous raw-PCM capture (replaces MediaRecorder). The tap runs the whole
   // session; while idle it keeps only a ~400ms rolling pre-roll, and during a
@@ -1541,6 +1545,7 @@ export function OpenVoiceConsole({
         // gap over 5 minutes means a genuinely newer deploy.
         const gapMs = Math.abs(Date.parse(String(v.buildAt)) - Date.parse(mine));
         if (!Number.isFinite(gapMs) || gapMs > 5 * 60 * 1000) {
+          setStaleTab(true);
           addLine(
             "sys",
             "⚠ A newer version of the game has been deployed since this page loaded — reload the page (Cmd+Shift+R) to get the latest fixes."
@@ -2756,6 +2761,17 @@ export function OpenVoiceConsole({
 
   return (
     <div className="card">
+      {staleTab ? (
+        <button
+          type="button"
+          className="staleTabBanner"
+          onClick={() => window.location.reload()}
+          title="Reload to get the latest version"
+        >
+          ⚠ NEW VERSION AVAILABLE — TAP TO RELOAD
+          <span className="staleTabSub">this tab is running old code; fixes won&apos;t apply until you reload</span>
+        </button>
+      ) : null}
       <div className="kv vcHeaderRow">
         <div className="kv">
           {!active ? (

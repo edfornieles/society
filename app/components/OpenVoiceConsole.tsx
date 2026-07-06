@@ -145,19 +145,30 @@ function drainSentences(buffer: string): { sentences: string[]; rest: string } {
   return { sentences: splitIntoSentences(complete), rest };
 }
 
-/**
- * For the very FIRST audio of a reply only: peel off a leading clause (comma/
- * semicolon/colon/dash boundary after at least a few words) so TTS can start
- * speaking without waiting for the full first sentence — unmute-style. Later
- * audio still goes sentence-by-sentence; clause granularity is only worth the
- * slight prosody cost when it buys time-to-first-sound.
- */
-function drainFirstClause(buffer: string): { text: string; rest: string } | null {
-  const m = buffer.match(/^([^,;:—–]{12,}?[,;:—–])\s/);
-  if (!m) return null;
-  const text = m[1].trim();
-  if (text.split(/\s+/).length < 3) return null;
-  return { text, rest: buffer.slice(m[0].length) };
+// Words an English utterance essentially never ENDS on — trailing one means
+// the speaker paused mid-thought, not finished. Whisper happily puts a period
+// on fragments, so terminal punctuation alone can't be trusted.
+const INCOMPLETE_TAIL_WORDS = new Set([
+  "and", "but", "or", "so", "because", "which", "that", "to", "of", "the",
+  "a", "an", "is", "are", "was", "were", "with", "for", "in", "on", "at",
+  "like", "um", "uh", "then", "if", "when", "while", "also", "my", "your",
+  "their", "our", "his", "her", "its", "very", "really", "quite", "more",
+]);
+
+/** Cheap semantic end-of-turn check (poor man's unmute semantic VAD): does the
+ *  speculative transcript read like a FINISHED thought? Used at hold expiry to
+ *  decide between committing the turn and granting mid-thought grace. */
+function utteranceEndsComplete(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/(\.\.\.|…)$/.test(t)) return false; // Whisper's own trailing-off marker
+  // ? and ! are deliberate punctuation — Whisper doesn't put them on fragments
+  // the way it sprinkles periods, so trust them even after a stopword ("…do
+  // that?" is a finished question; "…do that." may be a punctuated fragment).
+  if (/[!?]$/.test(t)) return true;
+  const lastWord = (t.replace(/[\s.!?,;:'"…-]+$/g, "").split(/\s+/).pop() ?? "").toLowerCase();
+  if (INCOMPLETE_TAIL_WORDS.has(lastWord)) return false;
+  return /\.$/.test(t);
 }
 
 /**
@@ -241,6 +252,9 @@ export function OpenVoiceConsole({
   // the end-of-turn hold. endCapture consumes it instead of transcribing fresh.
   const specSttPromiseRef = useRef<Promise<string> | null>(null);
   const specSttFiredRef = useRef(false);
+  // Resolved speculative transcript, if it has arrived — the VAD loop reads it
+  // at hold expiry to decide semantically whether the turn is really over.
+  const specSttTextRef = useRef<string | null>(null);
   // The user turn currently being answered — what a continuation merge (see
   // finishTranscript) rolls back and re-sends merged with the resumed speech.
   const lastUserTurnTextRef = useRef<string>("");
@@ -886,11 +900,16 @@ export function OpenVoiceConsole({
     let full = "";
     let buffer = "";
     let firstAudio = false;
+    // What has actually been handed to TTS — if we're interrupted mid-reply,
+    // history must record what the player HEARD, not the full generation (and
+    // not nothing: an unrecorded spoken reply makes the model repeat itself).
+    let spokenText = "";
     let playChain: Promise<void> = Promise.resolve();
 
     const enqueue = (sentence: string) => {
       const clean = sanitizeModelReply(sentence).trim();
       if (!clean || !looksLikeUsableReply(clean)) return;
+      spokenText = spokenText ? `${spokenText} ${clean}` : clean;
       if (!firstAudio) {
         firstAudio = true;
         setSendingSync(false);
@@ -932,15 +951,6 @@ export function OpenVoiceConsole({
         const { sentences, rest } = drainSentences(buffer);
         buffer = rest;
         for (const s of sentences) enqueue(s);
-        // Nothing spoken yet and no full sentence in sight — start TTS on the
-        // first CLAUSE so the voice comes in a beat earlier (unmute-style).
-        if (!firstAudio && sentences.length === 0) {
-          const clause = drainFirstClause(buffer);
-          if (clause) {
-            buffer = clause.rest;
-            enqueue(clause.text);
-          }
-        }
       }
       // Flush any trailing partial sentence (reply that didn't end on punctuation).
       if (speakTokenRef.current === myToken && buffer.trim()) enqueue(buffer);
@@ -977,9 +987,11 @@ export function OpenVoiceConsole({
       setSpeakingSync(false);
     }
     // Superseded mid-stream (barge-in or a continuation merge restarting the
-    // turn): this partial reply was never fully delivered — return nothing so
-    // the caller doesn't enshrine it in chat/history/bible.
-    if (speakTokenRef.current !== myToken) return "";
+    // turn): return only what was actually SPOKEN before the interruption —
+    // "" when nothing was (merge case: caller records nothing), the heard
+    // sentences otherwise (barge-in case: history matches what the player
+    // heard, so the model neither repeats itself nor references unsaid text).
+    if (speakTokenRef.current !== myToken) return spokenText;
     return sanitizeModelReply(full).trim() || full.trim();
   };
 
@@ -1560,6 +1572,11 @@ export function OpenVoiceConsole({
   const VAD_SILENCE_HOLD_EARLY_MS = 850; // utterance younger than the threshold below
   const VAD_SILENCE_HOLD_MS = 600; // established utterance
   const VAD_EARLY_UTTERANCE_MS = 3000; // "young" cutoff for the above
+  // Extra silence granted past the base hold when the speculative transcript
+  // reads mid-thought (or hasn't resolved) — see the semantic end-of-turn
+  // check in the monitor loop. Base hold stays snappy for finished thoughts;
+  // trailing-off thinkers get ~1.4s total before the turn is taken from them.
+  const VAD_INCOMPLETE_GRACE_MS = 800;
   // Snappiness: fire transcription this early into trailing silence, in
   // PARALLEL with the (longer) end-of-turn hold, so the ~800ms STT round-trip
   // overlaps the wait instead of adding to it (unmute.sh transcribes while you
@@ -1840,13 +1857,32 @@ export function OpenVoiceConsole({
               } silence=${silenceElapsed}ms/${holdMs} total=${(totalElapsed / 1000).toFixed(1)}s`
             );
           }
-          const hitSilence = hasSpokenRef.current && silenceElapsed >= holdMs;
+          // Semantic end-of-turn (poor man's unmute): at base hold expiry,
+          // commit only if the speculative transcript reads like a FINISHED
+          // thought. A mid-thought ending ("…which means the") — or a
+          // transcript that hasn't resolved yet — gets extra grace so the
+          // player can finish the sentence in the SAME capture instead of
+          // being cut off, talked over, and split across two turns. Committing
+          // costs nothing extra when complete: the reply needed that
+          // transcript before it could start anyway.
+          let hitSilence = false;
+          let endReason = "silence hold";
+          if (hasSpokenRef.current && silenceElapsed >= holdMs) {
+            const spec = specSttTextRef.current;
+            if (spec !== null && utteranceEndsComplete(spec)) {
+              hitSilence = true;
+              endReason = "silence hold (transcript complete)";
+            } else if (silenceElapsed >= holdMs + VAD_INCOMPLETE_GRACE_MS) {
+              hitSilence = true;
+              endReason = spec === null ? "grace elapsed (no transcript yet)" : "grace elapsed (mid-thought tail)";
+            }
+          }
           const hitMax = totalElapsed >= VAD_MAX_RECORD_MS;
           if (hitSilence || hitMax) {
             if (vadDebug()) {
               // eslint-disable-next-line no-console
               console.log(
-                `[VAD] ⛔ END capture — reason=${hitMax ? "MAX_RECORD (20s cap)" : "silence hold"} silence=${silenceElapsed}ms total=${(
+                `[VAD] ⛔ END capture — reason=${hitMax ? "MAX_RECORD (20s cap)" : endReason} silence=${silenceElapsed}ms total=${(
                   totalElapsed / 1000
                 ).toFixed(1)}s lastRms=${rms.toFixed(4)} thr=${speechThreshold.toFixed(4)}`
               );
@@ -1972,13 +2008,23 @@ export function OpenVoiceConsole({
     setTranscribing(true);
     // slice() → a stable snapshot; the tap keeps appending (only trailing
     // silence) until endCapture, so this transcript is already complete.
-    specSttPromiseRef.current = transcribeBlob(encodeWavFromPcm(pcmChunksRef.current.slice(), sampleRate));
+    const p = transcribeBlob(encodeWavFromPcm(pcmChunksRef.current.slice(), sampleRate));
+    specSttPromiseRef.current = p;
+    specSttTextRef.current = null;
+    // Publish the resolved text for the VAD loop's semantic end-of-turn check —
+    // only if this speculation is still the live one (identity check beats a
+    // boolean: a resumed word + a second speculation must not race a stale
+    // resolution into the ref).
+    p.then((t) => {
+      if (specSttPromiseRef.current === p) specSttTextRef.current = t;
+    }).catch(() => {});
   };
 
   /** A resumed word invalidates any pending speculative transcript. */
   const invalidateSpeculativeStt = () => {
     specSttFiredRef.current = false;
     specSttPromiseRef.current = null; // in-flight fetch still completes but is ignored
+    specSttTextRef.current = null;
   };
 
   /** Undo the chat/history record of a user turn that a continuation merge is
@@ -2062,6 +2108,7 @@ export function OpenVoiceConsole({
     const spec = specSttPromiseRef.current;
     specSttPromiseRef.current = null;
     specSttFiredRef.current = false;
+    specSttTextRef.current = null;
     const p = spec ?? (chunks.length && sampleRate ? transcribeBlob(encodeWavFromPcm(chunks, sampleRate)) : null);
     if (!p) return;
     p.then(finishTranscript).catch((e) => {

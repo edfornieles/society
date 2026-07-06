@@ -57,10 +57,11 @@ export async function POST(req: Request) {
     // single biggest latency win — audio starts after the first sentence, not
     // after the whole (potentially multi-second) completion.
     if (stream && !json) {
-      // `provider` is OpenRouter's routing extension (not in OpenAI's types):
-      // one model id fans out to several hosts whose time-to-first-token varies
-      // by 500ms+; route by measured latency since TTFT is exactly what a
-      // spoken turn waits on. The cast keeps the streaming overload.
+      // NOTE: OpenRouter's `provider: {sort: "latency"}` was tried here and
+      // REVERTED — it favors fast-TTFT hosts that drop streams mid-generation
+      // (observed live: replies truncated mid-sentence, spoken as ragged
+      // half-questions). Default routing weights uptime; a stable stream is
+      // worth more than ~300ms of first-token latency in a spoken turn.
       const upstreamStart = Date.now();
       const completion = await client.chat.completions.create({
         model,
@@ -70,8 +71,7 @@ export async function POST(req: Request) {
         // for ~30 words; this ceiling just stops a rambling model mid-flight.
         max_tokens: 100,
         stream: true,
-        provider: { sort: "latency" },
-      } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming);
+      });
       const encoder = new TextEncoder();
       const rs = new ReadableStream<Uint8Array>({
         async start(controller) {

@@ -904,6 +904,9 @@ export function OpenVoiceConsole({
     // history must record what the player HEARD, not the full generation (and
     // not nothing: an unrecorded spoken reply makes the model repeat itself).
     let spokenText = "";
+    // True when a ragged unpunctuated tail was cut from a truncated stream —
+    // the recorded reply must then also exclude it (history = what was heard).
+    let droppedTail = false;
     let playChain: Promise<void> = Promise.resolve();
 
     const enqueue = (sentence: string) => {
@@ -952,8 +955,19 @@ export function OpenVoiceConsole({
         buffer = rest;
         for (const s of sentences) enqueue(s);
       }
-      // Flush any trailing partial sentence (reply that didn't end on punctuation).
-      if (speakTokenRef.current === myToken && buffer.trim()) enqueue(buffer);
+      // Trailing text with no terminal punctuation is a TRUNCATED generation
+      // (mid-stream provider drop, token cap) far more often than a deliberate
+      // unpunctuated reply — speaking it produces audible half-questions
+      // ("What's forbidden knowledge, passed only—", observed live). Drop the
+      // ragged tail whenever a full sentence was already spoken; keep it only
+      // when it's ALL we got (a fragment beats a silent turn).
+      if (speakTokenRef.current === myToken && buffer.trim()) {
+        if (firstAudio && !/[.!?]['")\]]*\s*$/.test(buffer)) {
+          droppedTail = true;
+        } else {
+          enqueue(buffer);
+        }
+      }
     } catch (e) {
       if (speakTokenRef.current === myToken && (e as Error)?.name !== "AbortError") {
         // Streaming failed outright and we never spoke — fall back to the
@@ -992,6 +1006,7 @@ export function OpenVoiceConsole({
     // sentences otherwise (barge-in case: history matches what the player
     // heard, so the model neither repeats itself nor references unsaid text).
     if (speakTokenRef.current !== myToken) return spokenText;
+    if (droppedTail) return spokenText;
     return sanitizeModelReply(full).trim() || full.trim();
   };
 

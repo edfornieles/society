@@ -46,37 +46,68 @@ const DEFAULT_64BIT_STYLE_GUIDE =
 const GREETING_TEXT =
   "Hi — I'm your Society co-creator; we're playing the Society worldbuilding game together.\n\nWhat's the most important thing in this society? Everything else will follow from it.";
 
+/** Whisper resamples everything to 16kHz internally, so uploading the mic's
+ *  native 44.1/48kHz triples the payload (and the upload time — part of the
+ *  STT round-trip that sits on the reply's critical path) for zero accuracy. */
+const STT_SAMPLE_RATE = 16000;
+
 /** Encode mono Float32 PCM chunks as a 16-bit WAV blob (what /api/transcribe
- *  uploads). Raw PCM lets capture include pre-roll audio from BEFORE the VAD
- *  triggered — impossible with MediaRecorder, which only records from start(). */
+ *  uploads), downsampled to 16kHz. Raw PCM lets capture include pre-roll audio
+ *  from BEFORE the VAD triggered — impossible with MediaRecorder, which only
+ *  records from start(). */
 function encodeWavFromPcm(chunks: Float32Array[], sampleRate: number): Blob {
   let len = 0;
   for (const c of chunks) len += c.length;
-  const buf = new ArrayBuffer(44 + len * 2);
+  let pcm = new Float32Array(len);
+  {
+    let o = 0;
+    for (const c of chunks) {
+      pcm.set(c, o);
+      o += c.length;
+    }
+  }
+  let rate = sampleRate;
+  if (sampleRate > STT_SAMPLE_RATE) {
+    // Linear-interpolation resample. Fine for speech-to-text: any aliasing
+    // above 8kHz is outside the band Whisper listens to anyway.
+    const ratio = sampleRate / STT_SAMPLE_RATE;
+    const outLen = Math.max(1, Math.floor(len / ratio));
+    const out = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const pos = i * ratio;
+      const i0 = Math.floor(pos);
+      const frac = pos - i0;
+      const a = pcm[i0] ?? 0;
+      const b = pcm[Math.min(i0 + 1, len - 1)] ?? a;
+      out[i] = a + (b - a) * frac;
+    }
+    pcm = out;
+    rate = STT_SAMPLE_RATE;
+  }
+  const n = pcm.length;
+  const buf = new ArrayBuffer(44 + n * 2);
   const dv = new DataView(buf);
   const writeStr = (o: number, s: string) => {
     for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
   };
   writeStr(0, "RIFF");
-  dv.setUint32(4, 36 + len * 2, true);
+  dv.setUint32(4, 36 + n * 2, true);
   writeStr(8, "WAVE");
   writeStr(12, "fmt ");
   dv.setUint32(16, 16, true);
   dv.setUint16(20, 1, true); // PCM
   dv.setUint16(22, 1, true); // mono
-  dv.setUint32(24, sampleRate, true);
-  dv.setUint32(28, sampleRate * 2, true);
+  dv.setUint32(24, rate, true);
+  dv.setUint32(28, rate * 2, true);
   dv.setUint16(32, 2, true);
   dv.setUint16(34, 16, true);
   writeStr(36, "data");
-  dv.setUint32(40, len * 2, true);
+  dv.setUint32(40, n * 2, true);
   let o = 44;
-  for (const c of chunks) {
-    for (let i = 0; i < c.length; i++) {
-      const s = Math.max(-1, Math.min(1, c[i]));
-      dv.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      o += 2;
-    }
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[i]));
+    dv.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    o += 2;
   }
   return new Blob([buf], { type: "audio/wav" });
 }
@@ -112,6 +143,21 @@ function drainSentences(buffer: string): { sentences: string[]; rest: string } {
   const complete = buffer.slice(0, lastPunct + 1);
   const rest = buffer.slice(lastPunct + 1);
   return { sentences: splitIntoSentences(complete), rest };
+}
+
+/**
+ * For the very FIRST audio of a reply only: peel off a leading clause (comma/
+ * semicolon/colon/dash boundary after at least a few words) so TTS can start
+ * speaking without waiting for the full first sentence — unmute-style. Later
+ * audio still goes sentence-by-sentence; clause granularity is only worth the
+ * slight prosody cost when it buys time-to-first-sound.
+ */
+function drainFirstClause(buffer: string): { text: string; rest: string } | null {
+  const m = buffer.match(/^([^,;:—–]{12,}?[,;:—–])\s/);
+  if (!m) return null;
+  const text = m[1].trim();
+  if (text.split(/\s+/).length < 3) return null;
+  return { text, rest: buffer.slice(m[0].length) };
 }
 
 /**
@@ -195,6 +241,9 @@ export function OpenVoiceConsole({
   // the end-of-turn hold. endCapture consumes it instead of transcribing fresh.
   const specSttPromiseRef = useRef<Promise<string> | null>(null);
   const specSttFiredRef = useRef(false);
+  // The user turn currently being answered — what a continuation merge (see
+  // finishTranscript) rolls back and re-sends merged with the resumed speech.
+  const lastUserTurnTextRef = useRef<string>("");
   const micStreamRef = useRef<MediaStream | null>(null);
   // One AudioContext shared by mic-VAD analysis AND TTS-playback analysis,
   // created/unlocked on the Start button click (the one guaranteed direct
@@ -883,6 +932,15 @@ export function OpenVoiceConsole({
         const { sentences, rest } = drainSentences(buffer);
         buffer = rest;
         for (const s of sentences) enqueue(s);
+        // Nothing spoken yet and no full sentence in sight — start TTS on the
+        // first CLAUSE so the voice comes in a beat earlier (unmute-style).
+        if (!firstAudio && sentences.length === 0) {
+          const clause = drainFirstClause(buffer);
+          if (clause) {
+            buffer = clause.rest;
+            enqueue(clause.text);
+          }
+        }
       }
       // Flush any trailing partial sentence (reply that didn't end on punctuation).
       if (speakTokenRef.current === myToken && buffer.trim()) enqueue(buffer);
@@ -918,6 +976,10 @@ export function OpenVoiceConsole({
       setSendingSync(false);
       setSpeakingSync(false);
     }
+    // Superseded mid-stream (barge-in or a continuation merge restarting the
+    // turn): this partial reply was never fully delivered — return nothing so
+    // the caller doesn't enshrine it in chat/history/bible.
+    if (speakTokenRef.current !== myToken) return "";
     return sanitizeModelReply(full).trim() || full.trim();
   };
 
@@ -1490,18 +1552,21 @@ export function OpenVoiceConsole({
   // End-of-turn silence hold is ADAPTIVE: while an utterance is young the
   // player is often mid-thought ("the most important thing is… um…"), so give
   // them a generous window; once they've been talking a while, tighten it so
-  // the response feels snappy. A fixed 700ms cut people off early; a fixed
-  // 900ms felt laggy — splitting by utterance age serves both.
-  const VAD_SILENCE_HOLD_EARLY_MS = 1100; // utterance younger than the threshold below
-  const VAD_SILENCE_HOLD_MS = 800; // established utterance
+  // the response feels snappy. These sit LOWER than the old 1100/800 because a
+  // wrong early cut is no longer destructive: if the player resumes talking
+  // before the reply makes a sound, finishTranscript() aborts that reply and
+  // merges the fragments into one turn (unmute-style continuation) — so the
+  // hold only has to be right MOST of the time, not always.
+  const VAD_SILENCE_HOLD_EARLY_MS = 850; // utterance younger than the threshold below
+  const VAD_SILENCE_HOLD_MS = 600; // established utterance
   const VAD_EARLY_UTTERANCE_MS = 3000; // "young" cutoff for the above
   // Snappiness: fire transcription this early into trailing silence, in
-  // PARALLEL with the (longer) end-of-turn hold, so the ~500ms STT round-trip
+  // PARALLEL with the (longer) end-of-turn hold, so the ~800ms STT round-trip
   // overlaps the wait instead of adding to it (unmute.sh transcribes while you
   // talk; this is the file-API approximation). The hold still governs when the
   // turn actually ends, so this never cuts anyone off — worst case is a wasted
   // STT call when a pause turns out to be mid-thought.
-  const VAD_STT_SPECULATE_MS = 320;
+  const VAD_STT_SPECULATE_MS = 200;
   const VAD_MAX_RECORD_MS = 20000;
   // Barge-in (talking over the model) needs a HIGHER bar than normal onset:
   // the model's own voice leaks into the mic even with echo cancellation, so
@@ -1916,6 +1981,28 @@ export function OpenVoiceConsole({
     specSttPromiseRef.current = null; // in-flight fetch still completes but is ignored
   };
 
+  /** Undo the chat/history record of a user turn that a continuation merge is
+   *  about to replace with the merged utterance. Only the trailing entry is
+   *  eligible — anything older has already been answered. */
+  const rollbackUserTurn = (text: string) => {
+    const h = historyRef.current;
+    if (h.length && h[h.length - 1].role === "user" && h[h.length - 1].content === text) {
+      historyRef.current = h.slice(0, -1);
+    }
+    setChat((prev) => {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        if (prev[i].role !== "user") continue;
+        if (prev[i].text === text) {
+          const copy = prev.slice();
+          copy.splice(i, 1);
+          return copy;
+        }
+        break;
+      }
+      return prev;
+    });
+  };
+
   // The mic never closes mid-session, so dead-end paths (empty/junk/failed
   // transcription) just return — the always-on monitor loop is already
   // listening for the next utterance. No manual restart needed.
@@ -1928,6 +2015,37 @@ export function OpenVoiceConsole({
     // real speech — discard it rather than treating fabricated text as speech.
     if (isSpuriousUserTranscript(t)) {
       addLine("sys", "Ignored a junk transcription (likely background noise) — go ahead and speak again.");
+      return;
+    }
+    // Continuation merge (unmute-style): the player resumed talking after a
+    // turn-end fired, and the reply to the first fragment hasn't made a sound
+    // yet. Abort that reply and re-send BOTH fragments as one turn — without
+    // this, resumed speech during the thinking window was silently dropped,
+    // and a shorter silence hold would split thoughts destructively.
+    if (sendingRef.current && !speakingRef.current && activeRef.current) {
+      const prev = lastUserTurnTextRef.current;
+      speakTokenRef.current += 1; // invalidate the in-flight reply
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
+      stopCurrentAudio();
+      setSendingSync(false);
+      if (prev) {
+        rollbackUserTurn(prev);
+        // If the fragment had just been enshrined as the core value (turn-end
+        // fired mid-answer during onboarding), reopen onboarding so the MERGED
+        // utterance is evaluated as the core value instead of the half-phrase.
+        if (
+          onboardingPhaseRef.current === "done" &&
+          bibleRef.current.turnCount === 0 &&
+          normalizeCoreValueUtterance(prev) === String(bibleRef.current.canon.coreValues?.[0] ?? "")
+        ) {
+          bibleRef.current = structuredClone(bibleRef.current);
+          bibleRef.current.canon.coreValues[0] = "";
+          setBible(bibleRef.current);
+          onboardingPhaseRef.current = "pre_core";
+        }
+      }
+      void sendUserMessage(prev ? `${prev} ${t}` : t);
       return;
     }
     void sendUserMessage(t);
@@ -1972,6 +2090,7 @@ export function OpenVoiceConsole({
     if (recapSkipRef.current === false && recapPlaying) {
       recapSkipRef.current = true;
     }
+    lastUserTurnTextRef.current = transcript;
     addLine("user", transcript);
     pushHistory("user", transcript);
     setSendingSync(true);
@@ -1990,8 +2109,10 @@ export function OpenVoiceConsole({
       if (onboardingPhaseRef.current === "pre_core") {
         if (WANTS_RULES_PATTERN.test(transcript)) {
           const reply = await respondAndSpeak(buildRulesThenCoreInstructions());
-          addLine("assistant", reply);
-          pushHistory("assistant", reply);
+          if (reply) {
+            addLine("assistant", reply);
+            pushHistory("assistant", reply);
+          }
           return;
         }
         const coreValue = normalizeCoreValueUtterance(transcript);
@@ -2000,8 +2121,10 @@ export function OpenVoiceConsole({
         // is not a society value — re-ask instead of enshrining it as canon.
         if (isNonCoreValueUtterance(transcript) || isWeakCoreValueLabel(coreLabel)) {
           const reply = await respondAndSpeak(buildClarifyRepeatInstructions(transcript));
-          addLine("assistant", reply);
-          pushHistory("assistant", reply);
+          if (reply) {
+            addLine("assistant", reply);
+            pushHistory("assistant", reply);
+          }
           return;
         }
         onboardingPhaseRef.current = "done";
@@ -2011,10 +2134,12 @@ export function OpenVoiceConsole({
         setBible(bibleRef.current);
         void autosave();
         const reply = await respondAndSpeak(buildCoreValueAcceptedInstructions(coreLabel, playfulness));
-        addLine("assistant", reply);
-        pushHistory("assistant", reply);
-        setBible((b) => ({ ...b, lastAiUtterance: reply }));
-        void requestOobBibleUpdate(reply);
+        if (reply) {
+          addLine("assistant", reply);
+          pushHistory("assistant", reply);
+          setBible((b) => ({ ...b, lastAiUtterance: reply }));
+          void requestOobBibleUpdate(reply);
+        }
         return;
       }
 
@@ -2037,9 +2162,11 @@ export function OpenVoiceConsole({
         void autosave();
         addLine("sys", `Core value corrected to "${extractCoreTopicPhrase(normalized)}".`);
         const reply = await respondAndSpeak(buildCorrectionAckInstructions(extractCoreTopicPhrase(normalized)));
-        addLine("assistant", reply);
-        pushHistory("assistant", reply);
-        setBible((b) => ({ ...b, lastAiUtterance: reply }));
+        if (reply) {
+          addLine("assistant", reply);
+          pushHistory("assistant", reply);
+          setBible((b) => ({ ...b, lastAiUtterance: reply }));
+        }
         return;
       }
 
@@ -2048,10 +2175,12 @@ export function OpenVoiceConsole({
       // scrolled out of the short chat window — the fix for "losing the plot".
       const canonSummary = compactCanonSummary(bibleRef.current);
       const reply = await respondAndSpeak(buildGuidedTurnInstructions(coreValue, playfulness, canonSummary));
-      addLine("assistant", reply);
-      pushHistory("assistant", reply);
-      setBible((b) => ({ ...b, lastAiUtterance: reply, lastUserUtterance: transcript }));
-      void requestOobBibleUpdate(reply);
+      if (reply) {
+        addLine("assistant", reply);
+        pushHistory("assistant", reply);
+        setBible((b) => ({ ...b, lastAiUtterance: reply, lastUserUtterance: transcript }));
+        void requestOobBibleUpdate(reply);
+      }
     } catch (e) {
       addLine("sys", `Error: ${String((e as Error)?.message ?? e)}`);
       setSendingSync(false);

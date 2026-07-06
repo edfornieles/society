@@ -263,6 +263,10 @@ export function OpenVoiceConsole({
   // The user turn currently being answered — what a continuation merge (see
   // finishTranscript) rolls back and re-sends merged with the resumed speech.
   const lastUserTurnTextRef = useRef<string>("");
+  // One-shot: a continuation merge reopened onboarding so the merged utterance
+  // can replace a half-phrase core value. Bypasses the "core already
+  // established" fast-path exactly once, then clears.
+  const reopenedForMergeRef = useRef(false);
   // Per-turn latency clock, set when the turn commits (endCapture). Console
   // [TURN] lines mark transcript-ready / first-LLM-sentence / first-audio so a
   // "it felt slow" report comes with exact per-stage numbers from the field.
@@ -1084,7 +1088,10 @@ export function OpenVoiceConsole({
   }
 
   async function requestOobBibleUpdate(lastAiText: string) {
-    if (!bibleRef.current.canon.coreValues[0]) return;
+    // No core-value gate: callers only invoke this after a real game turn, and
+    // a session whose core got lost (echo/merge mishap) must still accrue
+    // canon + turnCount — gating on the core bricked canon AND auto-images
+    // for the whole session.
     if (!lastAiText?.trim()) return;
     const requestSessionId = sessionIdRef.current;
     try {
@@ -1174,7 +1181,9 @@ export function OpenVoiceConsole({
     if (!playedThisSessionRef.current) return; // not on resume/recap — only real play
     if (recapPlaying) return;
     if (imageBusy) return;
-    if (!bible.canon.coreValues[0]) return;
+    // Core label OR any accrued canon is enough grounding for a scene — a
+    // session whose core got lost must still produce images.
+    if (!bible.canon.coreValues[0] && bible.changelog.length === 0) return;
     if (images.length > 0) return;
     if (lastAutoImageFailureTurnRef.current === bible.turnCount) return;
     if (bible.turnCount < 1) return;
@@ -2122,6 +2131,23 @@ export function OpenVoiceConsole({
       addLine("sys", "Ignored a junk transcription (likely background noise) — go ahead and speak again.");
       return;
     }
+    // Echo guard: with capture allowed during think/speak phases, the agent's
+    // own voice (through speakers) can trigger a capture and come back as a
+    // "user" transcript. A short fragment that appears verbatim inside the
+    // agent's recent speech is an echo, not the player — a real session got
+    // its onboarding poisoned by the fragment "and how do" this way. Long
+    // utterances are exempt: a player genuinely quoting 12+ words back is
+    // speech, not echo.
+    const normEcho = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    const tNorm = normEcho(t);
+    if (tNorm && tNorm.split(" ").length <= 12) {
+      const recentAgentSpeech = [bibleRef.current.lastAiUtterance ?? "", GREETING_TEXT]
+        .concat(historyRef.current.filter((m) => m.role === "assistant").slice(-2).map((m) => m.content));
+      if (recentAgentSpeech.some((s) => s && normEcho(s).includes(tNorm))) {
+        addLine("sys", "Ignored an echo of the agent's own voice.");
+        return;
+      }
+    }
     // Continuation merge (unmute-style): the player resumed talking after a
     // turn-end fired, and the reply to the first fragment hasn't made a sound
     // yet. Abort that reply and re-send BOTH fragments as one turn — without
@@ -2139,15 +2165,17 @@ export function OpenVoiceConsole({
         // If the fragment had just been enshrined as the core value (turn-end
         // fired mid-answer during onboarding), reopen onboarding so the MERGED
         // utterance is evaluated as the core value instead of the half-phrase.
+        // The fragment core stays IN PLACE (never blank it — a session that
+        // diverges mid-merge with an empty core bricks canon updates and
+        // images); the one-shot flag below lets the pre_core branch re-run
+        // despite an established core, and acceptance simply overwrites it.
         if (
           onboardingPhaseRef.current === "done" &&
           bibleRef.current.turnCount === 0 &&
           normalizeCoreValueUtterance(prev) === String(bibleRef.current.canon.coreValues?.[0] ?? "")
         ) {
-          bibleRef.current = structuredClone(bibleRef.current);
-          bibleRef.current.canon.coreValues[0] = "";
-          setBible(bibleRef.current);
           onboardingPhaseRef.current = "pre_core";
+          reopenedForMergeRef.current = true;
         }
       }
       void sendUserMessage(prev ? `${prev} ${t}` : t);
@@ -2209,11 +2237,19 @@ export function OpenVoiceConsole({
       const establishedCore = extractCoreTopicPhrase(
         String(bibleRef.current.canon.coreValues?.[0] ?? "")
       ).trim();
-      if (onboardingPhaseRef.current === "pre_core" && establishedCore && !isWeakCoreValueLabel(establishedCore)) {
+      if (
+        onboardingPhaseRef.current === "pre_core" &&
+        establishedCore &&
+        !isWeakCoreValueLabel(establishedCore) &&
+        !reopenedForMergeRef.current
+      ) {
         onboardingPhaseRef.current = "done";
       }
 
       if (onboardingPhaseRef.current === "pre_core") {
+        // A merge-reopen gets exactly one utterance to replace the fragment
+        // core; after this pass the established-core fast-path applies again.
+        reopenedForMergeRef.current = false;
         if (WANTS_RULES_PATTERN.test(transcript)) {
           const reply = await respondAndSpeak(buildRulesThenCoreInstructions());
           if (reply) {

@@ -33,12 +33,14 @@ export async function POST(req: Request) {
       apiKey: process.env.OPENROUTER_API_KEY,
       baseURL: "https://openrouter.ai/api/v1",
     });
-    // DeepSeek (default 2026-07-03): coherent like unmute.sh's Mistral-Small
-    // while keeping the dark latitude Cydonia had. The prior Cydonia-24B (an
-    // uncensored roleplay fine-tune) rambled, garbled tokens, and asked
-    // multiple questions per turn — a bake-off through the identical prompts
-    // showed DeepSeek fixed all of it. Override with OPENROUTER_MODEL.
-    const model = process.env.OPENROUTER_MODEL?.trim() || "deepseek/deepseek-chat";
+    // Gemini 2.5 Flash (default 2026-07-06, replacing DeepSeek): a live
+    // bake-off through the real game prompt measured TTFT ~340-430ms vs
+    // DeepSeek's 650ms-6s (spiky across OpenRouter hosts), it built on the
+    // player's idea best of five candidates, and it passed the tone-dial-3
+    // dark-content probe without moralizing. Prior history: Cydonia-24B
+    // rambled/garbled (dropped 2026-07-03), DeepSeek was coherent but slow
+    // and flat at yes-and. Override with OPENROUTER_MODEL.
+    const model = process.env.OPENROUTER_MODEL?.trim() || "google/gemini-2.5-flash";
 
     // Real turn-by-turn history (instead of re-deriving "what's been said" into
     // the system prompt each call) lets the model track the world the way any

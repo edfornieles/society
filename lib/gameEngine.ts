@@ -39,7 +39,14 @@ const LEAK_LINE_PATTERNS: RegExp[] = [
  * not a full parse — good enough to remove the obvious artifacts without
  * mangling a legitimate multi-line reply.
  */
+// Evaluative/hype openers Gemini in particular likes to lead with despite the
+// prompt banning them ("This is excellent! …", "Fascinating. …"). Spoken every
+// turn they read as sycophancy, so strip a leading one (max two) outright.
+const HYPE_OPENER =
+  /^(?:(?:this is |that's |that is |how |what a |i love (?:this|that|it)|love (?:it|this|that))?(?:excellent|fascinating|intriguing|clever|brilliant|wonderful|beautiful|great|perfect|delicious|chilling|absolutely|interesting|nice|ooh?|wow)[.!,—:;]+\s*){1,2}/i;
+
 export function sanitizeModelReply(text: string): string {
+  text = text.replace(HYPE_OPENER, "");
   // Strip roleplay asterisks. A clause-like *stage direction* ("*ignores the
   // comment, stays in fiction*") is removed entirely; short *emphasis* ("*Art*")
   // keeps the word without the asterisks. Both would otherwise be spoken aloud
@@ -273,7 +280,7 @@ ${canonBlock}Core value: "${core}". Tone dial (${playfulness}/3): ${playfulnessT
 
 Voice: a sharp, curious anthropologist fascinated by this culture, not a friendly assistant. Speak directly to the player, in-fiction, no meta-commentary. Never refer to "the player" in third person; never restate "${core}" as if reminding them it's the premise.
 
-This is a fast spoken back-and-forth, NOT a monologue — keep it VERY SHORT: about 20 words, never more than 30, then stop. Deliver it as natural speech (never a numbered or bulleted list, no labels). In that small space: in a phrase, show you caught what the player just said and what it implies — don't just parrot it, but don't lecture; then ask ONE broad, open question about a FRESH part of the society you haven't explored yet. Draw from the whole breadth of a culture — daily life, work, food, art, music, love, family, celebration, ritual, nature, technology, community, leisure, style, trade, belief, status, fairness, health, death — or anything that fits this world. Vary the topic every turn and DON'T fixate on children, upbringing, or punishment; those are just occasional options, not the default. You MAY fold in one small vivid consequence only if it fits in a few words — otherwise skip it.
+This is a fast spoken back-and-forth, NOT a monologue — keep it VERY SHORT: about 20 words, hard cap 30, then stop. Deliver it as natural speech (never a numbered or bulleted list, no labels). Your move each turn, in that small space: first YES-AND — take the specific thing the player just added and extend it with ONE concrete consequence or detail that makes THEIR invention more real (build on it, don't just acknowledge it; never open with an evaluative word like "fascinating", "intriguing", "clever"); then ask ONE open question. Usually dig DEEPER into the thread you're both building — who wins, who loses, what it costs, what breaks, how it feels; pivot to a fresh domain of the society (daily life, work, food, art, music, love, family, celebration, ritual, nature, trade, belief, status, health, death — or anything that fits this world) once the current thread is well-explored, roughly every third turn. DON'T fixate on children, upbringing, or punishment; those are just occasional options, not the default.
 
 Use short, punchy sentences. Do NOT stack clauses into long literary run-ons; do NOT pile on adjectives or scenic description. Think quick, sharp conversation, not prose. Stay strictly consistent with the established canon above; never contradict it. The player is building this world from outside it — never ask what they've "seen" or "witnessed"; ask about the system. No compliments, hype, or thanks.`;
 }

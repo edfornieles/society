@@ -61,6 +61,7 @@ export async function POST(req: Request) {
       // one model id fans out to several hosts whose time-to-first-token varies
       // by 500ms+; route by measured latency since TTFT is exactly what a
       // spoken turn waits on. The cast keeps the streaming overload.
+      const upstreamStart = Date.now();
       const completion = await client.chat.completions.create({
         model,
         messages,
@@ -90,6 +91,10 @@ export async function POST(req: Request) {
         headers: {
           "Content-Type": "text/plain; charset=utf-8",
           "Cache-Control": "no-cache, no-transform",
+          // Time until OpenRouter answered with response HEADERS (its own
+          // provider handshake) — lets live debugging split "upstream is slow"
+          // from "streaming is buffered" without redeploying instrumentation.
+          "Server-Timing": `upstream;dur=${Date.now() - upstreamStart}`,
         },
       });
     }

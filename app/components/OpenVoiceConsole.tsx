@@ -1529,7 +1529,9 @@ export function OpenVoiceConsole({
     // Stale-tab detector: a tab left open across deploys keeps running old JS
     // — the source of several "still broken" reports that were actually fixed
     // hours earlier. Compare our baked build stamp with the server's and nag.
-    void fetch(withBase("/api/version"))
+    // Cache-bust + no-store: the edge can cache /api/version, and a stale
+    // cached stamp would fire a FALSE "reload" warning against the live client.
+    void fetch(withBase(`/api/version?cb=${Date.now()}`), { cache: "no-store" })
       .then((r) => r.json())
       .then((v) => {
         const mine = process.env.NEXT_PUBLIC_BUILD_AT ?? "unknown";

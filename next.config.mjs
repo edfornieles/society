@@ -12,6 +12,14 @@ const nextConfig = {
   // occasionally not activating on the first click). Production never
   // double-invokes, so turning it off just makes dev match prod behaviour.
   reactStrictMode: false,
+  env: {
+    // Build stamp, baked into BOTH the client bundle and the server at build
+    // time. A long-lived tab keeps running old JS through many deploys — the
+    // client compares its baked value against /api/version (the server's) and
+    // warns the player to reload. This mismatch caused repeated "still not
+    // fixed" reports from tabs running hours-old code.
+    NEXT_PUBLIC_BUILD_AT: new Date().toISOString(),
+  },
 };
 
 export default nextConfig;

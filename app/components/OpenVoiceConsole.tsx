@@ -1480,6 +1480,22 @@ export function OpenVoiceConsole({
     // every later turn (and barge-in) works without any further gesture.
     void ensureAudioContext();
     void openMic();
+    // Stale-tab detector: a tab left open across deploys keeps running old JS
+    // — the source of several "still broken" reports that were actually fixed
+    // hours earlier. Compare our baked build stamp with the server's and nag.
+    void fetch(withBase("/api/version"))
+      .then((r) => r.json())
+      .then((v) => {
+        const mine = process.env.NEXT_PUBLIC_BUILD_AT ?? "unknown";
+        if (v?.buildAt && v.buildAt !== mine) {
+          addLine(
+            "sys",
+            "⚠ A newer version of the game has been deployed since this page loaded — reload the page (Cmd+Shift+R) to get the latest fixes."
+          );
+          shipTelemetry("stale_tab", { client: mine, server: String(v.buildAt) });
+        }
+      })
+      .catch(() => {});
     // Warm the reply path while the player is still hearing the greeting: the
     // first real turn otherwise pays worker isolate spin-up + TLS + the
     // OpenRouter provider handshake all at once ("it took forever to respond
@@ -1616,8 +1632,14 @@ export function OpenVoiceConsole({
         }
       } catch (e) {
         addLine("sys", `Recap failed: ${String((e as Error)?.message ?? e)}`);
+        shipTelemetry("recap_failed", { msg: String((e as Error)?.message ?? e).slice(0, 120) });
         setSendingSync(false);
       } finally {
+        // Speaking over the recap cancels it (barge-in) — say so, or the
+        // player reads the sudden stop as "the recap broke".
+        if (recapSkipRef.current || recordingRef.current) {
+          addLine("sys", "Recap skipped — you're back in the game, go ahead.");
+        }
         setRecapPlaying(false);
         window.dispatchEvent(new CustomEvent("society-recap-show-image", { detail: { done: true } }));
       }
@@ -2340,6 +2362,7 @@ export function OpenVoiceConsole({
     // real speech — discard it rather than treating fabricated text as speech.
     if (isSpuriousUserTranscript(t)) {
       addLine("sys", "Ignored a junk transcription (likely background noise) — go ahead and speak again.");
+      shipTelemetry("junk_discarded", { text: t.slice(0, 80) });
       return;
     }
     // Echo guard: with capture allowed during think/speak phases, the agent's
@@ -2349,13 +2372,16 @@ export function OpenVoiceConsole({
     // its onboarding poisoned by the fragment "and how do" this way. Long
     // utterances are exempt: a player genuinely quoting 12+ words back is
     // speech, not echo.
-    // Cap at 6 words: real echo fragments observed live were 3-5 words ("and
-    // how do"), while a player's legitimate answer that quotes the scripted
-    // question ("the most important thing in this society…") runs longer —
-    // at 12 words the guard was eating those answers.
+    // 2-6 words only: real echo fragments observed live were 3-5 words ("and
+    // how do"). A SINGLE word is almost always a legitimate answer even when
+    // it appears in the agent's speech — players constantly answer with a
+    // word from the question ("Which wins?" → "Pain") and discarding that
+    // reads as "the game ignores me". Longer answers (7+) that quote the
+    // scripted question are also legitimate.
     const normEcho = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
     const tNorm = normEcho(t);
-    if (tNorm && tNorm.split(" ").length <= 6) {
+    const tWords = tNorm ? tNorm.split(" ").length : 0;
+    if (tWords >= 2 && tWords <= 6) {
       const recentAgentSpeech = [bibleRef.current.lastAiUtterance ?? "", GREETING_TEXT]
         .concat(historyRef.current.filter((m) => m.role === "assistant").slice(-2).map((m) => m.content));
       if (recentAgentSpeech.some((s) => s && normEcho(s).includes(tNorm))) {

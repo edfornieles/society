@@ -21,6 +21,11 @@ import {
   buildResumeInstructions,
   buildCorrectionAckInstructions,
   parseUserCorrectionLabel,
+  parseMishearCorrection,
+  findMisheardCounterpart,
+  applyMishearCorrection,
+  replaceMisheardWord,
+  buildMishearAckInstructions,
   WANTS_RULES_PATTERN,
   WRAP_UP_PATTERN,
   pickSessionTitle,
@@ -2249,6 +2254,35 @@ export function OpenVoiceConsole({
         addLine("sys", "Heard a wrap-up cue.");
         await finishAndSave();
         return;
+      }
+
+      // Word-level mishear correction ("I said cattle, not kettle"): rewrite
+      // the misheard word EVERYWHERE — core value, changelog, threads, chat
+      // history — not just acknowledge it. Without this the wrong word stays
+      // canon, the STT hint keeps biasing new transcriptions toward it, and
+      // the model "reconciles" the player's protests in-fiction (a real
+      // session ended up with cow-worship substituting for "Kettle").
+      const mishear = parseMishearCorrection(transcript);
+      if (mishear) {
+        const wrong = mishear.wrong?.trim() || findMisheardCounterpart(bibleRef.current, mishear.right);
+        if (wrong && wrong.toLowerCase() !== mishear.right.toLowerCase()) {
+          bibleRef.current = applyMishearCorrection(structuredClone(bibleRef.current), wrong, mishear.right);
+          setBible(bibleRef.current);
+          historyRef.current = historyRef.current.map((m) => ({
+            ...m,
+            content: replaceMisheardWord(m.content, wrong, mishear.right),
+          }));
+          void autosave();
+          addLine("sys", `Misheard "${wrong}" — corrected to "${mishear.right}" everywhere.`);
+          const reply = await respondAndSpeak(buildMishearAckInstructions(mishear.right, wrong));
+          if (reply) {
+            addLine("assistant", reply);
+            pushHistory("assistant", reply);
+            setBible((b) => ({ ...b, lastAiUtterance: reply }));
+          }
+          return;
+        }
+        // No plausible counterpart found in the world — treat as normal speech.
       }
 
       // Let the player CORRECT a mis-heard core value ("no, you got it wrong,

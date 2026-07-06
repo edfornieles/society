@@ -194,6 +194,131 @@ export function parseUserCorrectionLabel(transcript: string): string {
   return "";
 }
 
+// --- Mishear correction ("I said cattle, not kettle") ----------------------
+// Whisper mishears entrench themselves: the wrong word becomes canon, the STT
+// hint then biases every later transcription toward it, and the model
+// reconciles the player's protests in-fiction (a real session ended up with
+// cow-worship "substituting for Kettle"). The fix must rewrite the wrong word
+// EVERYWHERE — core value, changelog, threads, chat history — not just ack it.
+
+function escapeRegExpWord(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/** Sounds-like gate: are these plausibly the same word misheard? Keeps
+ *  worldbuilding statements ("it's harvest, not war") out of the correction
+ *  path — those differ too much to be a transcription slip. */
+function plausibleMishearPair(wrong: string, right: string): boolean {
+  const a = wrong.toLowerCase(), b = right.toLowerCase();
+  if (a === b) return false;
+  const dist = levenshtein(a, b);
+  return dist <= Math.max(2, Math.ceil(Math.max(a.length, b.length) / 3));
+}
+
+/** Case-preserving whole-word replace (handles a trailing plural s). */
+export function replaceMisheardWord(text: string, wrong: string, right: string): string {
+  const re = new RegExp(`\\b${escapeRegExpWord(wrong)}(s)?\\b`, "gi");
+  return text.replace(re, (match, plural) => {
+    const cap = /[A-Z]/.test(match[0]);
+    const base = cap ? right.charAt(0).toUpperCase() + right.slice(1) : right;
+    return plural ? `${base}s` : base;
+  });
+}
+
+/** Deep-walk any JSON-ish value, applying the word fix to every string leaf. */
+export function applyMishearCorrection<T>(value: T, wrong: string, right: string): T {
+  if (typeof value === "string") return replaceMisheardWord(value, wrong, right) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => applyMishearCorrection(v, wrong, right)) as unknown as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = applyMishearCorrection(v, wrong, right);
+    return out as unknown as T;
+  }
+  return value;
+}
+
+/** Find what the player was likely misheard AS: the closest-sounding word
+ *  already written into the bible (edit distance ≤ 2, ≥ 4 chars). */
+export function findMisheardCounterpart(bible: unknown, right: string): string {
+  const words = new Set<string>();
+  const walk = (v: unknown) => {
+    if (typeof v === "string") {
+      for (const w of v.split(/[^a-zA-Z'-]+/)) if (w.length >= 4) words.add(w.toLowerCase());
+    } else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === "object") Object.values(v).forEach(walk);
+  };
+  walk(bible);
+  const target = right.toLowerCase();
+  let best = "", bestDist = 3;
+  for (const w of words) {
+    if (w === target) continue;
+    const d = levenshtein(w, target);
+    if (d < bestDist || (d === bestDist && !best)) {
+      bestDist = d;
+      best = w;
+    }
+  }
+  return bestDist <= 2 ? best : "";
+}
+
+/**
+ * Detect a mishear correction and extract the RIGHT word (and the WRONG one
+ * when the player names it). Both-word patterns are gated on the words
+ * actually sounding alike; right-only patterns rely on the caller finding a
+ * close counterpart in the bible, so ordinary speech falls through harmlessly.
+ */
+export function parseMishearCorrection(transcript: string): { right: string; wrong?: string } | null {
+  const t = transcript.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
+  if (!t || t.split(/\s+/).length > 16) return null;
+  const word = "([a-zA-Z][a-zA-Z'-]{2,24})";
+  let m: RegExpMatchArray | null;
+
+  // "... cattle, not kettle" / "I said cattle not kettle" / "it's cattle, not kettle"
+  m = t.match(new RegExp(`\\b${word}[,—-]?\\s+not\\s+${word}$`, "i"));
+  if (m && plausibleMishearPair(m[2], m[1])) return { right: m[1], wrong: m[2] };
+
+  // "not kettle, cattle" / "not kettle — I said cattle"
+  m = t.match(new RegExp(`\\bnot\\s+${word}[,—-]?\\s+(?:i\\s+(?:said|meant)\\s+)?${word}$`, "i"));
+  if (m && plausibleMishearPair(m[1], m[2])) return { right: m[2], wrong: m[1] };
+
+  // "change kettle to cattle" / "replace kettle with cattle"
+  m = t.match(new RegExp(`\\b(?:change|replace|correct)\\s+${word}\\s+(?:to|with)\\s+${word}$`, "i"));
+  if (m && plausibleMishearPair(m[1], m[2])) return { right: m[2], wrong: m[1] };
+
+  // Right-only forms — caller must locate the misheard counterpart in canon:
+  // "no/you misheard, I said cattle" / "I meant cattle" / "the word is cattle"
+  m = t.match(new RegExp(`\\b(?:i\\s+(?:said|meant)|the\\s+word\\s+is|i'?m\\s+saying)\\s+${word}$`, "i"));
+  if (m) return { right: m[1] };
+  m = t.match(new RegExp(`\\byou\\s+(?:mis)?heard(?:\\s+me)?(?:\\s+wrong)?[,.]?\\s+(?:it'?s\\s+)?${word}$`, "i"));
+  if (m) return { right: m[1] };
+
+  return null;
+}
+
+/** Spoken ack after a mishear fix: use the corrected word, no apology theater. */
+export function buildMishearAckInstructions(right: string, wrong: string): string {
+  return `${ENGLISH_ONLY_INSTRUCTION}
+
+${OUTPUT_FORMAT_GUARD}
+
+You misheard the player earlier: everywhere the world says "${wrong}", the player actually said "${right}". The canon has already been corrected. In ONE short sentence, naturally re-ground the society in "${right}" (no apology theater, no meta words like "transcription" or "canon" — just speak as the anthropologist who now hears it right). Then ask ONE open question that builds on "${right}". Max 30 words total, spoken aloud.`;
+}
+
 export function buildClarifyRepeatInstructions(captured: string): string {
   const capturedPart = captured
     ? `You may have misheard the player as: "${captured}".`
@@ -280,7 +405,7 @@ ${canonBlock}Core value: "${core}". Tone dial (${playfulness}/3): ${playfulnessT
 
 Voice: a sharp, curious anthropologist fascinated by this culture, not a friendly assistant. Speak directly to the player, in-fiction, no meta-commentary. Never refer to "the player" in third person; never restate "${core}" as if reminding them it's the premise.
 
-This is a fast spoken back-and-forth, NOT a monologue — keep it SHORT: about 35 words, hard cap 50, then stop. Deliver it as natural speech (never a numbered or bulleted list, no labels). Your move each turn: first YES-AND — take the specific thing the player just added and extend it with one or two concrete world-facts that make THEIR invention more real: name a practice, a place, a profession, a cost, a rivalry — actually ADD to the society, don't just restate the idea or gesture at implications (and never open with an evaluative word like "fascinating", "intriguing", "clever"); then ALWAYS end with ONE open question. Usually dig DEEPER into the thread you're both building — who wins, who loses, what it costs, what breaks, how it feels; pivot to a fresh domain of the society (daily life, work, food, art, music, love, family, celebration, ritual, nature, trade, belief, status, health, death — or anything that fits this world) once the current thread is well-explored, roughly every third turn. DON'T fixate on children, upbringing, or punishment; those are just occasional options, not the default.
+This is a fast spoken back-and-forth, NOT a monologue — keep it SHORT: about 35 words, hard cap 50, then stop. Deliver it as natural speech (never a numbered or bulleted list, no labels). You are a CO-AUTHOR, not an interviewer: every turn, treat the player's idea as confirmed truth and IMPROVISE on top of it — invent one or two specific, named features of the society that follow from their idea (a ritual, an institution, a profession, a slang term, a law, an object, a rivalry) and state them as established fact, confidently, the way an improviser says "yes, and". Give things NAMES the player can pick up and reuse. Don't restate their idea, don't just gesture at implications, and never open with an evaluative word like "fascinating", "intriguing", "clever". Then ALWAYS end with ONE open question. Usually dig DEEPER into the thread you're both building — who wins, who loses, what it costs, what breaks, how it feels; pivot to a fresh domain of the society (daily life, work, food, art, music, love, family, celebration, ritual, nature, trade, belief, status, health, death — or anything that fits this world) once the current thread is well-explored, roughly every third turn. DON'T fixate on children, upbringing, or punishment; those are just occasional options, not the default.
 
 Use short, punchy sentences. Do NOT stack clauses into long literary run-ons; do NOT pile on adjectives or scenic description. Think quick, sharp conversation, not prose. Stay strictly consistent with the established canon above; never contradict it. The player is building this world from outside it — never ask what they've "seen" or "witnessed"; ask about the system. No compliments, hype, or thanks.`;
 }

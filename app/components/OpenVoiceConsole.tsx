@@ -887,7 +887,7 @@ export function OpenVoiceConsole({
    * non-streamed askModel+speak on any streaming error.
    */
   const respondAndSpeak = async (instructions: string): Promise<string> => {
-    const finalInstructions = `${instructions}\n\nVOICE MODE — CRITICAL: this is spoken aloud, not read. Keep your ENTIRE reply to 2 short sentences maximum. Brevity matters far more here than in text.\n\n${OUTPUT_FORMAT_GUARD}`;
+    const finalInstructions = `${instructions}\n\nVOICE MODE — CRITICAL: this is spoken aloud, not read. Keep your ENTIRE reply to 3 short sentences maximum: up to two statements that add something concrete to the world, then exactly one question. ALWAYS end on the question — it hands the turn back to the player.\n\n${OUTPUT_FORMAT_GUARD}`;
     const myToken = ++speakTokenRef.current;
     // Abort any prior stream and silence any audio still playing from a
     // previous turn — guarantees a single voice, no leftover speech.

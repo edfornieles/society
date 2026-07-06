@@ -69,9 +69,12 @@ export async function POST(req: Request) {
         model,
         messages,
         // Conversational turns must stay SHORT for a real back-and-forth feel
-        // (a 220-token reply is ~25s of speech = a monologue). The prompt asks
-        // for ~30 words; this ceiling just stops a rambling model mid-flight.
-        max_tokens: 100,
+        // — but that's the PROMPT's job (~40 words). This ceiling is only a
+        // runaway stop, and it needs headroom above the asked-for length:
+        // at 100 tokens Gemini regularly hit the cap mid-question, the
+        // ragged-tail guard dropped the fragment, and turns ended with no
+        // handoff back to the player ("it got cut off at the end").
+        max_tokens: 220,
         stream: true,
       });
       const encoder = new TextEncoder();

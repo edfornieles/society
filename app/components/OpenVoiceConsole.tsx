@@ -295,6 +295,8 @@ export function OpenVoiceConsole({
   const hasSpokenRef = useRef(false);
   const silenceSinceRef = useRef<number | null>(null);
   const speechOnsetSinceRef = useRef<number | null>(null);
+  // Sustained voice-level-but-sub-threshold sound while idle (quiet-mic rescue).
+  const quietVoiceSinceRef = useRef<number | null>(null);
   const bargeSinceRef = useRef<number | null>(null);
   const captureStartedAtRef = useRef<number | null>(null);
   const noiseFloorRef = useRef<number>(0.012);
@@ -1995,10 +1997,31 @@ export function OpenVoiceConsole({
             if (speechOnsetSinceRef.current === null) speechOnsetSinceRef.current = now;
             if (now - speechOnsetSinceRef.current >= VAD_ONSET_MS) {
               speechOnsetSinceRef.current = null;
+              quietVoiceSinceRef.current = null;
               beginCapture(now);
             }
           } else {
             speechOnsetSinceRef.current = null;
+            // Quiet-mic rescue: sustained sound clearly ABOVE the room floor
+            // but UNDER the speech threshold for 2s straight is someone
+            // talking into a quiet mic, not noise — the exact "it says
+            // waiting for you to speak while I'm speaking" dead end. Start
+            // the capture anyway and say so in the console (always on), so a
+            // silent failure becomes a diagnosable one.
+            const voiceish = rms > Math.max(0.02, noiseFloorRef.current * 1.5);
+            if (voiceish) {
+              if (quietVoiceSinceRef.current === null) quietVoiceSinceRef.current = now;
+              if (now - quietVoiceSinceRef.current >= 2000) {
+                quietVoiceSinceRef.current = null;
+                // eslint-disable-next-line no-console
+                console.info(
+                  `[VAD] quiet-mic rescue: sustained voice-level sound (rms=${rms.toFixed(4)}) under speech threshold (${speechThreshold.toFixed(4)}) — capturing anyway. Mic may be too quiet or too far away.`
+                );
+                beginCapture(now);
+              }
+            } else {
+              quietVoiceSinceRef.current = null;
+            }
           }
         }
       }
@@ -2138,9 +2161,13 @@ export function OpenVoiceConsole({
     // its onboarding poisoned by the fragment "and how do" this way. Long
     // utterances are exempt: a player genuinely quoting 12+ words back is
     // speech, not echo.
+    // Cap at 6 words: real echo fragments observed live were 3-5 words ("and
+    // how do"), while a player's legitimate answer that quotes the scripted
+    // question ("the most important thing in this society…") runs longer —
+    // at 12 words the guard was eating those answers.
     const normEcho = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
     const tNorm = normEcho(t);
-    if (tNorm && tNorm.split(" ").length <= 12) {
+    if (tNorm && tNorm.split(" ").length <= 6) {
       const recentAgentSpeech = [bibleRef.current.lastAiUtterance ?? "", GREETING_TEXT]
         .concat(historyRef.current.filter((m) => m.role === "assistant").slice(-2).map((m) => m.content));
       if (recentAgentSpeech.some((s) => s && normEcho(s).includes(tNorm))) {

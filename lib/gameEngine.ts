@@ -110,6 +110,17 @@ export function isWeakCoreValueLabel(label: string): boolean {
   const t = label.replace(/\s+/g, " ").trim().toLowerCase();
   if (!t) return true;
   if (t.length < 3) return true;
+  // A core value is a label, not a speech. A "label" longer than ~8 words or
+  // containing sentence punctuation mid-string is a whole utterance that
+  // slipped through extraction (a live session enshrined 45 words of merged
+  // echo + player speech: "communicate with others help? yeah, so everybody…").
+  // Rejecting it re-asks — and because the resumed-session guard uses this
+  // same check, a session already poisoned with a garbled core self-heals by
+  // reopening onboarding on its next turn.
+  if (t.split(" ").length > 8) return true;
+  // Sentence punctuation followed by MORE words = a run-on utterance, not a
+  // label. (Punctuation followed by a non-space is fine — "A.I" is a valid core.)
+  if (/[.?!]\s+\S/.test(t)) return true;
   if (FILLER_ONLY_LABEL.test(t)) return true;
   if (BARE_VERB_LABEL.test(t)) return true;
   if (FUNCTION_WORD_LABEL.test(t)) return true;

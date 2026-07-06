@@ -104,6 +104,10 @@ export function GameShell() {
           </button>
           <div className="hudNav">
             <button onClick={onNewGame}>New Game</button>
+            <button onClick={() => setShowRules((v) => !v)}>{showRules ? "Hide rules" : "Rules"}</button>
+            <button onClick={() => setShowSettings((v) => !v)}>
+              Settings
+            </button>
             <div className="savedMenu">
               <button onClick={() => setShowSaved((v) => !v)}>Saved</button>
               <SessionPickerV2
@@ -117,10 +121,6 @@ export function GameShell() {
                 }}
               />
             </div>
-            <button onClick={() => setShowRules((v) => !v)}>{showRules ? "Hide rules" : "Rules"}</button>
-            <button onClick={() => setShowSettings((v) => !v)}>
-              Settings
-            </button>
           </div>
         </nav>
         <div className={`imageProgressWrap ${imageBusy ? "is-visible" : "is-hidden"}`}>

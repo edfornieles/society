@@ -33,7 +33,7 @@ main {
   gap: 8px;
 }
 .logoImage {
-  width: 216px;
+  width: 160px;
   height: auto;
   image-rendering: pixelated;
 }
@@ -63,10 +63,13 @@ main {
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 12px;
+  gap: 8px;
   /* Above the sidebar (z-index 5) so the Saved dropdown overlays it. */
   z-index: 20;
-  padding: 10px 12px 12px;
+  /* Hug the content — the old fixed 560px card left a large empty beige
+     square around four small buttons. */
+  padding: 6px 8px 8px;
+  width: fit-content;
   max-width: min(560px, calc(100vw - 24px));
   background: rgba(241, 197, 154, 0.92);
   border: 2px solid var(--border);

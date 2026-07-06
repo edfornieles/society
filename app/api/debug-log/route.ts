@@ -1,48 +1,51 @@
 import { NextResponse } from "next/server";
-import { usingR2 } from "@/lib/serverStorage";
+import { putTelemetryBatch, getTelemetry } from "@/lib/serverStorage";
 
 export const runtime = "nodejs";
 
+/**
+ * POST /api/debug-log — client-side telemetry for LIVE session monitoring.
+ * The voice console batches events (turn timings, TTS underruns, echo
+ * discards, errors) and flushes them here; they land in storage (R2 in prod)
+ * under debug-logs/{sessionId}/, so a session can be watched remotely WHILE
+ * it is being played via the GET below. Best-effort: never breaks the game.
+ *
+ * Accepts the batched shape { sessionId, events: [...] } and the legacy
+ * single-event shape { sessionId, event, data }.
+ */
 export async function POST(req: Request) {
   try {
-    // In cloud deployments backed by R2, debug logs are best-effort no-op to
-    // avoid filesystem dependencies.
-    if (usingR2()) {
-      return NextResponse.json({ ok: true });
-    }
-
-    const fs = await import("fs/promises");
-    const path = await import("path");
-    const logsDir = path.join(process.cwd(), "data", "logs");
-    await fs.mkdir(logsDir, { recursive: true });
-    const body = await req.json().catch(() => null);
+    const body = (await req.json().catch(() => null)) as
+      | { sessionId?: string; events?: unknown[]; event?: string; data?: Record<string, unknown> }
+      | null;
     if (!body) return NextResponse.json({ ok: false });
 
-    const { sessionId, event, data } = body as {
-      sessionId: string;
-      event: string;
-      data?: Record<string, unknown>;
-    };
+    const sessionId = String(body.sessionId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "unknown";
+    const events = Array.isArray(body.events)
+      ? body.events.slice(0, 100)
+      : body.event
+      ? [{ at: Date.now(), type: String(body.event), ...(body.data ?? {}) }]
+      : [];
+    if (!events.length) return NextResponse.json({ ok: true });
 
-    const ts = new Date().toISOString();
-    const lines: string[] = [`\n[${ts}] ${event}`];
-
-    if (data) {
-      for (const [k, v] of Object.entries(data)) {
-        const val = typeof v === "string" ? v : JSON.stringify(v);
-        // Truncate very long strings (e.g. full system prompts) to keep logs readable
-        const display = val.length > 2000 ? val.slice(0, 2000) + "…(truncated)" : val;
-        lines.push(`  ${k}: ${display}`);
-      }
-    }
-
-    const entry = lines.join("\n") + "\n";
-    const logFile = path.join(logsDir, `${sessionId ?? "unknown"}.log`);
-    await fs.appendFile(logFile, entry, "utf-8");
-
+    await putTelemetryBatch(sessionId, events);
     return NextResponse.json({ ok: true });
   } catch (e: any) {
     // Never crash the game due to a logging failure
     return NextResponse.json({ ok: false, error: String(e?.message) });
+  }
+}
+
+/** GET /api/debug-log?sessionId=X&since=<ms> — read a session's telemetry. */
+export async function GET(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const sessionId = String(url.searchParams.get("sessionId") || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
+    if (!sessionId) return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
+    const since = Number(url.searchParams.get("since") || 0);
+    const events = await getTelemetry(sessionId, Number.isFinite(since) ? since : 0);
+    return NextResponse.json({ sessionId, count: events.length, events });
+  } catch (e: any) {
+    return NextResponse.json({ error: String(e?.message ?? "telemetry read failed") }, { status: 500 });
   }
 }

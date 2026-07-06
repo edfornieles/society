@@ -229,11 +229,22 @@ export async function saveGame(game: SavedGame): Promise<void> {
 }
 
 export async function listGames(): Promise<Pick<SavedGame, "id" | "createdAt" | "title">[]> {
+  try {
+    return await listGamesStrict();
+  } catch {
+    return [];
+  }
+}
+
+/** Like listGames but THROWS on fetch failure — for UIs that must distinguish
+ *  "you have no saved societies" from "the list couldn't be loaded" (an empty
+ *  list on a transient error reads as data loss to the player). */
+export async function listGamesStrict(): Promise<Pick<SavedGame, "id" | "createdAt" | "title">[]> {
   const r = await fetch(API_BASE);
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
     console.warn("[listGames]", r.status, detail);
-    return [];
+    throw new Error(`listGames failed (${r.status})`);
   }
   const rows = (await r.json()) as { id: string; createdAt: number; title?: string }[];
   return rows.map((g) => ({

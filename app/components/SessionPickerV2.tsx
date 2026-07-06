@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useSociety } from "./SocietyContext";
-import { getGame, listGames, normalizeSavedGame, saveGame } from "@/lib/gameHistory";
+import { getGame, listGamesStrict, normalizeSavedGame, saveGame } from "@/lib/gameHistory";
 
 export function SessionPickerV2({
   disabled,
@@ -16,21 +16,36 @@ export function SessionPickerV2({
   const { history, setHistory, setBible, setImages, setFinalRecord, setSummary, setSessionId } = useSociety();
   const [selectedId, setSelectedId] = useState<string>("");
   const [loading, setLoading] = useState(false);
+  // Distinguish "the list is empty" from "the fetch failed" — a transient
+  // network error used to render as "No saved sessions yet.", which reads as
+  // data loss to a player with thirty societies saved.
+  const [listError, setListError] = useState(false);
 
   const options = useMemo(() => history, [history]);
 
+  const refresh = () => {
+    listGamesStrict()
+      .then((rows) => {
+        setHistory(rows);
+        setListError(false);
+      })
+      .catch(() => setListError(true));
+  };
+
   useEffect(() => {
     // Load/refresh on mount
-    listGames().then(setHistory).catch(() => {});
-    const handler = () => listGames().then(setHistory).catch(() => {});
+    refresh();
+    const handler = () => refresh();
     window.addEventListener("society-sessions-updated", handler);
     return () => window.removeEventListener("society-sessions-updated", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setHistory]);
 
   // Refetch whenever the Saved menu opens so the list isn’t stale (e.g. after restarts).
   useEffect(() => {
     if (!showSaved) return;
-    listGames().then(setHistory).catch(() => {});
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSaved, setHistory]);
 
   const onSelect = async (id: string) => {
@@ -59,7 +74,14 @@ export function SessionPickerV2({
   return (
     <div className="card sessionCard" role="menu" aria-label="Saved sessions">
       <div className="sessionCardHeader">SAVED SOCIETIES</div>
-      {options.length === 0 ? (
+      {listError ? (
+        <p className="sessionEmpty">
+          Couldn’t load your saved societies —{" "}
+          <button type="button" onClick={refresh} style={{ font: "inherit" }}>
+            retry
+          </button>
+        </p>
+      ) : options.length === 0 ? (
         <p className="sessionEmpty">No saved sessions yet.</p>
       ) : (
         <div className="sessionList">

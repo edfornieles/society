@@ -273,6 +273,25 @@ export function OpenVoiceConsole({
   // [TURN] lines mark transcript-ready / first-LLM-sentence / first-audio so a
   // "it felt slow" report comes with exact per-stage numbers from the field.
   const turnT0Ref = useRef<number | null>(null);
+  // Live-monitoring telemetry: events batch here and flush to /api/debug-log
+  // every ~3s (stored per-session in R2), so a session can be watched
+  // remotely WHILE it's being played. Best-effort — failures are swallowed.
+  const telemetryBufRef = useRef<Record<string, unknown>[]>([]);
+  const telemetryTimerRef = useRef<number | null>(null);
+  const shipTelemetry = (type: string, detail?: Record<string, unknown>) => {
+    telemetryBufRef.current.push({ at: Date.now(), type, ...(detail ?? {}) });
+    if (telemetryTimerRef.current !== null) return;
+    telemetryTimerRef.current = window.setTimeout(() => {
+      telemetryTimerRef.current = null;
+      const events = telemetryBufRef.current.splice(0);
+      if (!events.length) return;
+      void fetch(withBase("/api/debug-log"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: sessionIdRef.current || "no-session", events }),
+      }).catch(() => {});
+    }, 3000);
+  };
   const micStreamRef = useRef<MediaStream | null>(null);
   // One AudioContext shared by mic-VAD analysis AND TTS-playback analysis,
   // created/unlocked on the Start button click (the one guaranteed direct
@@ -629,6 +648,7 @@ export function OpenVoiceConsole({
         return blob;
       } catch (e) {
         setTtsError(String((e as Error)?.message ?? "TTS failed"));
+        shipTelemetry("tts_error", { msg: String((e as Error)?.message ?? "TTS failed").slice(0, 120) });
         return null;
       }
     }
@@ -795,11 +815,18 @@ export function OpenVoiceConsole({
       const src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(gain);
+      // Underrun: playback caught up with the download mid-sentence — the gap
+      // is audible chopping. Ship it so a "voice broke up" report comes with
+      // exact counts and gap sizes from the live session.
+      if (sources.length > 0 && ctx.currentTime - cursor > 0.02) {
+        shipTelemetry("tts_underrun", { gapMs: Math.round((ctx.currentTime - cursor) * 1000) });
+      }
       const startAt = Math.max(ctx.currentTime, cursor);
       try { src.start(startAt); } catch { return; }
       if (turnT0Ref.current) {
         // eslint-disable-next-line no-console
         console.info(`[TURN] AUDIO +${Date.now() - turnT0Ref.current}ms after turn end`);
+        shipTelemetry("turn_audio", { ms: Date.now() - turnT0Ref.current });
         turnT0Ref.current = null;
       }
       cursor = startAt + buf.duration;
@@ -1029,6 +1056,7 @@ export function OpenVoiceConsole({
         if (turnT0Ref.current) {
           // eslint-disable-next-line no-console
           console.info(`[TURN] first sentence +${Date.now() - turnT0Ref.current}ms after turn end`);
+          shipTelemetry("turn_first_sentence", { ms: Date.now() - turnT0Ref.current });
         }
         setSendingSync(false);
         setSpeakingSync(true);
@@ -2076,6 +2104,7 @@ export function OpenVoiceConsole({
             if (bargeSinceRef.current === null) bargeSinceRef.current = now;
             if (now - bargeSinceRef.current >= VAD_BARGE_MS) {
               bargeSinceRef.current = null;
+              shipTelemetry("barge_in", { rms: Number(rms.toFixed(4)) });
               cancelSpeech();
               beginCapture(now);
             }
@@ -2129,6 +2158,7 @@ export function OpenVoiceConsole({
                 console.info(
                   `[VAD] quiet-mic rescue: sustained voice-level sound (rms=${rms.toFixed(4)}) under speech threshold (${speechThreshold.toFixed(4)}) — capturing anyway. Mic may be too quiet or too far away.`
                 );
+                shipTelemetry("quiet_mic_rescue", { rms: Number(rms.toFixed(4)), thr: Number(speechThreshold.toFixed(4)) });
                 beginCapture(now);
               }
             } else {
@@ -2265,6 +2295,7 @@ export function OpenVoiceConsole({
     if (turnT0Ref.current) {
       // eslint-disable-next-line no-console
       console.info(`[TURN] transcript +${Date.now() - turnT0Ref.current}ms after turn end`);
+      shipTelemetry("turn_transcript", { ms: Date.now() - turnT0Ref.current, words: text.trim().split(/\s+/).length });
     }
     const t = text.trim();
     if (!t) return;
@@ -2293,6 +2324,7 @@ export function OpenVoiceConsole({
         .concat(historyRef.current.filter((m) => m.role === "assistant").slice(-2).map((m) => m.content));
       if (recentAgentSpeech.some((s) => s && normEcho(s).includes(tNorm))) {
         addLine("sys", "Ignored an echo of the agent's own voice.");
+        shipTelemetry("echo_discarded", { text: t.slice(0, 80) });
         return;
       }
     }

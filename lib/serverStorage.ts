@@ -351,6 +351,66 @@ export async function putGeneratedImage(sessionId: string, pngBytes: Buffer, fil
 }
 
 /** Fetch a stored media object (image) by key, for the /api/media route. */
+/** Telemetry batches for LIVE session monitoring: the client flushes small
+ *  JSON event arrays here; R2 has no append, so each flush is one object at
+ *  debug-logs/{sessionId}/{ts}.json. Read back merged via getTelemetry. */
+export async function putTelemetryBatch(sessionId: string, events: unknown[]): Promise<void> {
+  const ts = Date.now();
+  if (driver === "local") {
+    const fs = await import("fs/promises");
+    const dir = await ensureLocalDir("data", "debug-logs", sessionId);
+    await fs.writeFile(await localPathJoin(dir, `${ts}.json`), JSON.stringify(events), "utf-8");
+    return;
+  }
+  const s3 = getS3();
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: r2Bucket,
+      Key: `debug-logs/${sessionId}/${ts}.json`,
+      Body: Buffer.from(JSON.stringify(events)),
+      ContentType: "application/json; charset=utf-8",
+    })
+  );
+}
+
+export async function getTelemetry(sessionId: string, sinceMs: number): Promise<unknown[]> {
+  const tsOf = (name: string) => Number(name.split("/").pop()?.replace(".json", "") ?? NaN);
+  if (driver === "local") {
+    const fs = await import("fs/promises");
+    const dir = await ensureLocalDir("data", "debug-logs", sessionId);
+    const files = (await fs.readdir(dir)).filter((f) => f.endsWith(".json") && tsOf(f) >= sinceMs).sort();
+    const batches = await Promise.all(
+      files.map(async (f) => {
+        try {
+          return JSON.parse(await fs.readFile(await localPathJoin(dir, f), "utf-8"));
+        } catch {
+          return [];
+        }
+      })
+    );
+    return batches.flat();
+  }
+  const s3 = getS3();
+  const out = await s3.send(
+    new ListObjectsV2Command({ Bucket: r2Bucket, Prefix: `debug-logs/${sessionId}/` })
+  );
+  const keys = (out.Contents ?? [])
+    .map((c) => c.Key || "")
+    .filter((k) => k.endsWith(".json") && tsOf(k) >= sinceMs)
+    .sort();
+  const batches = await Promise.all(
+    keys.map(async (key) => {
+      try {
+        const obj = await s3.send(new GetObjectCommand({ Bucket: r2Bucket, Key: key }));
+        return JSON.parse(await streamToString(obj.Body));
+      } catch {
+        return [];
+      }
+    })
+  );
+  return batches.flat();
+}
+
 export async function getMediaObject(key: string): Promise<{ body: Buffer; contentType: string } | null> {
   const cleanKey = key.replace(/^\/+/, "");
   // Guard against path traversal.

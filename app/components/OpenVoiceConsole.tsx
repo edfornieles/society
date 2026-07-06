@@ -258,6 +258,10 @@ export function OpenVoiceConsole({
   // The user turn currently being answered — what a continuation merge (see
   // finishTranscript) rolls back and re-sends merged with the resumed speech.
   const lastUserTurnTextRef = useRef<string>("");
+  // Per-turn latency clock, set when the turn commits (endCapture). Console
+  // [TURN] lines mark transcript-ready / first-LLM-sentence / first-audio so a
+  // "it felt slow" report comes with exact per-stage numbers from the field.
+  const turnT0Ref = useRef<number | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   // One AudioContext shared by mic-VAD analysis AND TTS-playback analysis,
   // created/unlocked on the Start button click (the one guaranteed direct
@@ -730,6 +734,11 @@ export function OpenVoiceConsole({
       src.connect(gain);
       const startAt = Math.max(ctx.currentTime, cursor);
       try { src.start(startAt); } catch { return; }
+      if (turnT0Ref.current) {
+        // eslint-disable-next-line no-console
+        console.info(`[TURN] AUDIO +${Date.now() - turnT0Ref.current}ms after turn end`);
+        turnT0Ref.current = null;
+      }
       cursor = startAt + buf.duration;
       streamPlayheadRef.current = cursor;
       sources.push(src);
@@ -915,6 +924,10 @@ export function OpenVoiceConsole({
       spokenText = spokenText ? `${spokenText} ${clean}` : clean;
       if (!firstAudio) {
         firstAudio = true;
+        if (turnT0Ref.current) {
+          // eslint-disable-next-line no-console
+          console.info(`[TURN] first sentence +${Date.now() - turnT0Ref.current}ms after turn end`);
+        }
         setSendingSync(false);
         setSpeakingSync(true);
       }
@@ -1275,6 +1288,16 @@ export function OpenVoiceConsole({
     // every later turn (and barge-in) works without any further gesture.
     void ensureAudioContext();
     void openMic();
+    // Warm the reply path while the player is still hearing the greeting: the
+    // first real turn otherwise pays worker isolate spin-up + TLS + the
+    // OpenRouter provider handshake all at once ("it took forever to respond
+    // to my first answer"). A one-word background completion costs ~nothing
+    // and moves that cold start off the critical path.
+    void fetch(withBase("/api/voice-turn"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instructions: "Reply with the single word: ok", maxTokens: 4 }),
+    }).catch(() => {});
     // Reset per-session gates: a resumed/recapped session hasn't been "played"
     // until the player speaks, so auto-images stay off until then.
     playedThisSessionRef.current = false;
@@ -1614,9 +1637,14 @@ export function OpenVoiceConsole({
   // above residual echo (the model's own voice after cancellation, ~0.02-0.04)
   // but well below normal speech (~0.1). Headphones remove echo entirely and
   // make this even more reliable.
-  const VAD_BARGE_MIN_RMS = 0.045;
-  const VAD_BARGE_MULTIPLIER = 1.6;
-  const VAD_BARGE_MS = 130;
+  // Lowered 2026-07-06 (0.045/1.6/130 required a slightly raised voice —
+  // player couldn't reliably cut in): normal speech (~0.05-0.15 rms) held for
+  // ~a syllable now interrupts, while residual post-AEC echo of the model's
+  // own voice (~0.02-0.03) still sits under the bar. Headphones make this
+  // near-perfect; speakers depend on the browser's echo cancellation.
+  const VAD_BARGE_MIN_RMS = 0.035;
+  const VAD_BARGE_MULTIPLIER = 1.35;
+  const VAD_BARGE_MS = 90;
   // Hysteresis: STARTING a turn uses the strict speech threshold (avoids phantom
   // starts), but once capturing, "still talking" uses a much LOWER bar so the
   // quiet dips between words/syllables aren't mistaken for the end of the turn
@@ -1926,9 +1954,16 @@ export function OpenVoiceConsole({
           } else {
             bargeSinceRef.current = null;
           }
-        } else if (!sendingRef.current) {
-          // Idle, waiting for the user. Require a short sustained onset so a
-          // single click/thump doesn't start a phantom capture.
+        } else {
+          // Idle OR the model is thinking (sending). BOTH listen for speech:
+          // during think-time the player must be able to keep talking — the
+          // capture starts here, and when its transcript lands the
+          // continuation-merge in finishTranscript aborts the in-flight reply
+          // and re-sends the merged turn (unmute-style interruption). A cough
+          // costs nothing: junk transcripts are discarded and the pending
+          // reply, never aborted, continues normally.
+          // Require a short sustained onset so a single click/thump doesn't
+          // start a phantom capture.
           // Throttled idle trace — THIS is the "Waiting for you to speak" state.
           // If rms stays under speechThr while you talk, onset never fires and
           // capture never starts (the exact "it says waiting but I'm speaking"
@@ -2069,6 +2104,10 @@ export function OpenVoiceConsole({
   // listening for the next utterance. No manual restart needed.
   const finishTranscript = (text: string) => {
     setTranscribing(false);
+    if (turnT0Ref.current) {
+      // eslint-disable-next-line no-console
+      console.info(`[TURN] transcript +${Date.now() - turnT0Ref.current}ms after turn end`);
+    }
     const t = text.trim();
     if (!t) return;
     // Whisper hallucinates plausible-sounding boilerplate (URLs, "thank you for
@@ -2114,6 +2153,7 @@ export function OpenVoiceConsole({
 
   const endCapture = () => {
     if (!recordingRef.current) return;
+    turnT0Ref.current = Date.now();
     setRecordingSync(false);
     const chunks = pcmChunksRef.current;
     pcmChunksRef.current = [];

@@ -8,7 +8,7 @@ import { comfyEnabled, generateImageViaComfy } from "@/lib/comfyImage";
 export const runtime = "nodejs";
 
 const DEFAULT_STYLE_GUIDE =
-  "64-bit retro pixel art (late PS1/N64-era). Crisp pixels with richer detail, broader palette, subtle dithering, strong silhouettes, readable shapes. Cozy cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
+  "64-bit retro pixel art (late PS1/N64-era). Crisp pixels with richer detail, broader palette, subtle dithering, strong silhouettes, readable shapes. Clean contemporary cinematic framing translated into pixel art — bold modern color, not warm nostalgia. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
 
 const ONBOARDING_IMAGE_PATTERN =
   /\b(core value|most important thing in this society|defining society|collaboration|pivotal moment|human asserts|co-creator|inquiry|engaging discussion|key pillar|pillar of|encourages exploration|exploration of (their|the) (core )?values?|gathering space|two characters? (animat|discuss|talk|chat|debat)|characters? animatedly|discuss(ing|ion) (of|on|about) (honor|art|love|technology|surveillance|the core|the value|values|the most))\b/i;
@@ -270,9 +270,9 @@ export async function POST(req: Request) {
     // model — otherwise the look drags every scene back to a "rustic medieval"
     // village regardless of what the society's canon actually implies.
     const periodDirective =
-      "PERIOD/SETTING — infer the era STRICTLY from the canon seeds above (their technology, materials, clothing, institutions, transport, architecture). This is NOT a medieval or fantasy world by default. Unless a canon seed EXPLICITLY calls for it, do NOT depict castles, keeps, knights, armor, chainmail, swords, torches, thatched huts, cobblestone lanes, feudal peasant dress, or a rustic village square — the pixel-art style must not drag the scene into medieval fantasy. If the canon gives no clear era, pick a SPECIFIC non-medieval period that fits the society (modern, industrial, near/far-future, ancient, 20th-century, retro-futurist, etc.) and render it consistently.";
+      "PERIOD/SETTING — DEFAULT TO THE PRESENT DAY or a near-future version of it: contemporary clothing, materials, lighting, architecture and technology. Render a PAST era (medieval, Victorian, 1920s, ancient, etc.) ONLY if a canon seed EXPLICITLY places the society in the past — 'fashion matters here' or 'water is currency' says nothing about era and must NOT drift old-timey. The retro pixel-art STYLE is purely a rendering technique; it does not mean the WORLD is retro. No castles, knights, gas lamps, bonnets, horse-drawn anything, or rustic village squares unless the canon demands them. Palette: bold and contemporary, not sepia/amber nostalgia.";
     const MEDIEVAL_NEGATIVES =
-      "medieval setting, feudal setting, fantasy RPG, castle, stone keep, fortress walls, knight, plate armor, chainmail, sword, shield, lit torches, thatched roof, cobblestone street, rustic village square, peasant tunic, wooden market stalls";
+      "medieval setting, feudal setting, fantasy RPG, castle, stone keep, fortress walls, knight, plate armor, chainmail, sword, shield, lit torches, thatched roof, cobblestone street, rustic village square, peasant tunic, wooden market stalls, victorian street, gas lamps, gaslight, bonnet, top hat, horse-drawn carriage, corset, petticoat, sepia tone, vintage nostalgia, old-timey";
     const combinedNegative = [negativePrompt, MEDIEVAL_NEGATIVES].filter(Boolean).join(", ");
 
     const fullPrompt = [

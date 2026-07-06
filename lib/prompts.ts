@@ -373,14 +373,16 @@ export function bibleAnchorContextForImages(bible: SocietyBible): string {
   return `
 ANCHOR — facts invented in this session (image MUST be grounded here; do not invent unrelated lore):
 - Core value line(s): ${core}
-- Last thing the human said: ${lastUser}
-- Last thing the AI said (most recent in-world invention): ${lastAi}
-- Recent canon changelog (quote or tight paraphrase ONLY from these for seedFacts):
+- Recent canon changelog (this is the CURATED, coherent record — quote or tight paraphrase ONLY from these for seedFacts):
 ${changelogBlock}
 
+Recent dialogue (context only — may contain mis-hears, background noise, or off-topic asides):
+- Last thing the human said: ${lastUser}
+- Last thing the AI said: ${lastAi}
+
 IMAGE FIDELITY (critical):
-- This picture must illustrate something said in the LAST exchange above — prioritize "${lastUser}" and/or "${lastAi}".
-- At least TWO seedFacts must be verbatim or near-verbatim snippets from those two lines (or from changelog lines that directly restate what was just said). Do not illustrate an older unrelated topic unless the dialogue is explicitly reminiscing.
+- Anchor the scene on the MOST RECENT changelog lines above (the latest turns) — that is what the players just built, already curated and coherent. Every seedFact must trace to a CHANGELOG line or the core value.
+- The "last thing the human said" / "last thing the AI said" are RAW dialogue and may be garbled or unrelated to this society (e.g. a stray comment, a mis-transcription, audio from elsewhere). Use them ONLY if they are clearly consistent with the core value "${core}" and the changelog. If a line does not fit the established society, IGNORE it completely — never build the image around it. A haircut society must never produce an image about empires, war, or anything absent from its changelog.
 `.trim();
 }
 
@@ -416,8 +418,8 @@ Return STRICT JSON only (no markdown) with:
 }
 
 Hard requirements (non-negotiable):
-- Every seedFact MUST trace to a line in the ANCHOR section (changelog, core value, or last human/AI utterance). If the changelog is empty, seedFacts may ONLY restate the core value and the last human/AI lines — do not fabricate extra worldbuilding.
-- At least TWO seedFacts MUST quote or tightly paraphrase "Last thing the human said" and/or "Last thing the AI said" whenever those lines are not "(none yet)". The image must depict THAT latest exchange, not an unrelated earlier topic.
+- Every seedFact MUST trace to a CHANGELOG line or the core value in the ANCHOR section. If the changelog is empty, seedFacts may ONLY restate the core value (and the last human/AI lines IF they clearly fit the core value) — do not fabricate extra worldbuilding.
+- Prefer the MOST RECENT changelog lines so the image reflects what was just built. Do NOT anchor the image on the raw "last thing said" lines when they conflict with the core value or changelog — those may be mis-hears or stray audio; ignore anything that doesn't fit this society.
 - The "prompt" field must describe a scene that could not apply to a random society: it must include concrete nouns and actions from seedFacts (e.g. a named ritual object, a distinct building feature, a specific social rule in action).
 - FORBIDDEN in title, caption, and prompt: vague phrases with no anchor such as: "embodies the values", "spirit of community", "everyday life in a utopia", "people living in harmony", "a better world", "diverse citizens", "the heart of society", "timeless tradition" — unless you immediately tie each to a named detail from seedFacts.
 - PERIOD/SETTING — infer it from the canon, do NOT default to medieval fantasy. Retro pixel art tends to drift toward castles, knights, torch-lit villages and cobblestone — resist that hard. Read the canon for era cues (technology, materials, institutions, clothing, transport) and set the scene in the period they imply: it could be modern, near-future, far-future, industrial, ancient, 20th-century, retro-futurist, surreal, or genuinely anachronistic. When the canon gives no clear period, pick a NON-medieval one that fits the society's specifics. Medieval/feudal imagery (castles, knights, thatched huts, torches, swords) is only allowed if the canon explicitly calls for it.

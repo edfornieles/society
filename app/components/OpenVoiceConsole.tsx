@@ -273,6 +273,13 @@ export function OpenVoiceConsole({
   // can replace a half-phrase core value. Bypasses the "core already
   // established" fast-path exactly once, then clears.
   const reopenedForMergeRef = useRef(false);
+  // Did the CURRENT capture begin as a deliberate barge-in (player loud over
+  // the agent)? If so its transcript starts a fresh turn. If NOT — it began
+  // while idle/thinking and only resolved after the agent started speaking
+  // (the player's trailing words) — it must MERGE into the prior turn instead
+  // of cancelling the reply. Distinguishes "I'm interrupting" from "I hadn't
+  // finished talking".
+  const captureViaBargeRef = useRef(false);
   // Per-turn latency clock, set when the turn commits (endCapture). Console
   // [TURN] lines mark transcript-ready / first-LLM-sentence / first-audio so a
   // "it felt slow" report comes with exact per-stage numbers from the field.
@@ -2222,7 +2229,7 @@ export function OpenVoiceConsole({
               bargeSinceRef.current = null;
               shipTelemetry("barge_in", { rms: Number(rms.toFixed(4)) });
               cancelSpeech();
-              beginCapture(now);
+              beginCapture(now, true); // deliberate barge — starts a fresh turn
             }
           } else {
             bargeSinceRef.current = null;
@@ -2308,9 +2315,10 @@ export function OpenVoiceConsole({
    *  already holds the last ~400ms — the syllable spoken BEFORE the VAD
    *  confirmed this is speech — so "starting" is just flipping the recording
    *  flag, which stops the rolling buffer from being trimmed. */
-  const beginCapture = (now: number) => {
+  const beginCapture = (now: number, viaBarge = false) => {
     if (recordingRef.current) return;
     if (!micStreamRef.current || !pcmProcessorRef.current) return;
+    captureViaBargeRef.current = viaBarge;
     captureStartedAtRef.current = now;
     hasSpokenRef.current = true; // we only get here because speech was detected
     silenceSinceRef.current = null;
@@ -2463,17 +2471,22 @@ export function OpenVoiceConsole({
       return;
     }
     // Continuation merge (unmute-style): the player resumed talking after a
-    // turn-end fired, and the reply to the first fragment hasn't made a sound
-    // yet. Abort that reply and re-send BOTH fragments as one turn — without
-    // this, resumed speech during the thinking window was silently dropped,
-    // and a shorter silence hold would split thoughts destructively.
-    if (sendingRef.current && !speakingRef.current && activeRef.current) {
+    // turn-end fired prematurely. Abort the in-flight reply and re-send BOTH
+    // fragments as one turn. This fires whether the agent is THINKING or has
+    // already started SPEAKING — as long as the capture wasn't a deliberate
+    // barge-in. A capture that began while idle/thinking and only resolved
+    // after the agent started speaking is the player's TRAILING words, not an
+    // interruption; without merging here it cancelled the reply and the agent
+    // answered only the fragment (the "agent cut off mid-sentence" report).
+    // A real barge (captureViaBarge) is excluded — that IS a fresh turn.
+    if ((sendingRef.current || speakingRef.current) && !captureViaBargeRef.current && activeRef.current) {
       const prev = lastUserTurnTextRef.current;
       speakTokenRef.current += 1; // invalidate the in-flight reply
       streamAbortRef.current?.abort();
       streamAbortRef.current = null;
       stopCurrentAudio();
       setSendingSync(false);
+      setSpeakingSync(false);
       if (prev) {
         rollbackUserTurn(prev);
         // If the fragment had just been enshrined as the core value (turn-end

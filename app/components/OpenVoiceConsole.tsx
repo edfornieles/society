@@ -260,6 +260,8 @@ export function OpenVoiceConsole({
   // Resolved speculative transcript, if it has arrived — the VAD loop reads it
   // at hold expiry to decide semantically whether the turn is really over.
   const specSttTextRef = useRef<string | null>(null);
+  // Last speculative fire time (duty-cycle cooldown; reset per capture).
+  const lastSpecFireAtRef = useRef(0);
   // The user turn currently being answered — what a continuation merge (see
   // finishTranscript) rolls back and re-sends merged with the resumed speech.
   const lastUserTurnTextRef = useRef<string>("");
@@ -2158,6 +2160,7 @@ export function OpenVoiceConsole({
     silenceSinceRef.current = null;
     specSttFiredRef.current = false;
     specSttPromiseRef.current = null;
+    lastSpecFireAtRef.current = 0; // fresh utterance, fresh duty-cycle
     setRecordingSync(true);
     if (typeof window !== "undefined" && ((window as any).__VAD_DEBUG ?? process.env.NODE_ENV !== "production")) {
       // eslint-disable-next-line no-console
@@ -2199,9 +2202,17 @@ export function OpenVoiceConsole({
    *  with the still-running end-of-turn hold (see VAD_STT_SPECULATE_MS). */
   const fireSpeculativeStt = () => {
     if (specSttFiredRef.current) return;
+    // Duty-cycle: each speculative fire re-encodes and re-uploads the ENTIRE
+    // utterance so far — on a rambling turn with a pause every half-second
+    // that was one full-length Whisper call per pause. A short cooldown keeps
+    // the latency benefit (the hold is 600ms; worst case the transcript lands
+    // ~300ms later on rapid pause-resume-pause patterns) while cutting the
+    // redundant calls to at most ~1 per second of speech.
+    if (Date.now() - lastSpecFireAtRef.current < 900) return;
     const sampleRate = pcmSampleRateRef.current;
     if (!pcmChunksRef.current.length || !sampleRate) return;
     specSttFiredRef.current = true;
+    lastSpecFireAtRef.current = Date.now();
     setTranscribing(true);
     // slice() → a stable snapshot; the tap keeps appending (only trailing
     // silence) until endCapture, so this transcript is already complete.

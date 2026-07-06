@@ -11,6 +11,10 @@
   "compatibility_date": "2026-06-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "keep_vars": true,
+  // Smart Placement: the worker's real work is subrequests to OpenRouter /
+  // OpenAI / the TTS tunnel, so let Cloudflare run it near those upstreams
+  // instead of pinned to the visitor's edge — trims ~100-200ms per LLM call.
+  "placement": { "mode": "smart" },
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"

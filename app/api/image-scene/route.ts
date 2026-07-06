@@ -156,12 +156,21 @@ export async function POST(req: Request) {
     const sceneSystemMessage =
       "You are an art director for an illustrated worldbuilding game. Respond ONLY with the JSON object requested — no markdown, no extra text. seedFacts must be traceable to the ANCHOR in the user message; at least two must come from the last human and/or last AI lines when present. The image must depict that latest exchange, not a random earlier topic. Do not invent institutions or customs not implied there.";
 
+    // Proposal model: the fast voice model via OpenRouter (TTFT ~400ms,
+    // JSON-mode verified) shaves ~2-4s off the image round-trip vs gpt-4o-mini.
+    // The RETRY attempt falls back to gpt-4o-mini so a Gemini formatting slip
+    // can't kill the turn's image.
+    const orKey = process.env.OPENROUTER_API_KEY;
+    const orClient = orKey ? new OpenAI({ apiKey: orKey, baseURL: "https://openrouter.ai/api/v1" }) : null;
+    const orModel = process.env.OPENROUTER_MODEL?.trim() || "google/gemini-2.5-flash";
+
     let raw = "";
     let parsed: Record<string, any> = {};
     let parseError: string | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const chat = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+      const useFast = attempt === 0 && orClient;
+      const chat = await (useFast ? orClient! : client).chat.completions.create({
+        model: useFast ? orModel : "gpt-4o-mini",
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: sceneSystemMessage },
@@ -316,12 +325,14 @@ export async function POST(req: Request) {
     }
 
     // Save PNG to storage (R2 when configured, local disk otherwise).
-    // putGeneratedImage logs and returns null on failure; b64 is still returned
-    // for immediate display and kept in the saved record when imagePath is null.
+    // putGeneratedImage logs and returns null on failure. When storage
+    // succeeds, return ONLY the path — the client renders via /api/media, and
+    // shipping the ~1-2MB base64 alongside doubled every image's transfer.
+    // b64 is the fallback for the storage-failed case so the image still shows.
     const imagePath = await putGeneratedImage(sessionId ?? "unknown-session", pngBytes, `${Date.now()}.png`);
 
     return NextResponse.json({
-      b64: pngBytes.toString("base64"),
+      ...(imagePath ? {} : { b64: pngBytes.toString("base64") }),
       imagePath,
       title,
       caption,

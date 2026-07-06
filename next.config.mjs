@@ -16,9 +16,13 @@ const nextConfig = {
     // Build stamp, baked into BOTH the client bundle and the server at build
     // time. A long-lived tab keeps running old JS through many deploys — the
     // client compares its baked value against /api/version (the server's) and
-    // warns the player to reload. This mismatch caused repeated "still not
-    // fixed" reports from tabs running hours-old code.
-    NEXT_PUBLIC_BUILD_AT: new Date().toISOString(),
+    // warns the player to reload. IMPORTANT: this config file is evaluated
+    // more than once per build (client and server compiles), so a bare
+    // new Date() here produces DIFFERENT stamps within one build and a
+    // permanent false "reload me" warning (observed live: 3.6s apart). The
+    // deploy script passes a single NEXT_PUBLIC_BUILD_AT for the whole build;
+    // the Date fallback is for ad-hoc local builds only.
+    NEXT_PUBLIC_BUILD_AT: process.env.NEXT_PUBLIC_BUILD_AT || new Date().toISOString(),
   },
 };
 

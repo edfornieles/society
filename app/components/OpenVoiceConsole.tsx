@@ -1487,7 +1487,12 @@ export function OpenVoiceConsole({
       .then((r) => r.json())
       .then((v) => {
         const mine = process.env.NEXT_PUBLIC_BUILD_AT ?? "unknown";
-        if (v?.buildAt && v.buildAt !== mine) {
+        if (!v?.buildAt || v.buildAt === mine) return;
+        // Tolerate small skew: the stamp is evaluated per compile pass, so
+        // client and server of the SAME build can differ by seconds. Only a
+        // gap over 5 minutes means a genuinely newer deploy.
+        const gapMs = Math.abs(Date.parse(String(v.buildAt)) - Date.parse(mine));
+        if (!Number.isFinite(gapMs) || gapMs > 5 * 60 * 1000) {
           addLine(
             "sys",
             "⚠ A newer version of the game has been deployed since this page loaded — reload the page (Cmd+Shift+R) to get the latest fixes."

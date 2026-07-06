@@ -385,9 +385,24 @@ export function OpenVoiceConsole({
     setSending(v);
   };
   const setSpeakingSync = (v: boolean) => {
+    // Stamp the moment the agent STOPS speaking. For a short hangover after
+    // this, the agent's own voice is still ringing in the room / mic buffer
+    // (on speakers, without hardware echo cancellation), so the VAD must treat
+    // captures as likely echo — see agentSpokeRecently() + the idle-branch
+    // hangover. This is the fix for "agent keeps trying to talk, then fails":
+    // its own tail was captured as a 1-2 word user turn, which started a new
+    // turn and cancelled the reply it was still speaking.
+    if (speakingRef.current && !v) agentSpokeEndAtRef.current = Date.now();
     speakingRef.current = v;
     setSpeaking(v);
   };
+  // True for AGENT_ECHO_HANGOVER_MS after the agent's audio stops (and always
+  // while it's actively speaking) — the window where captured audio is far
+  // more likely to be the agent's own echo than the player.
+  const AGENT_ECHO_HANGOVER_MS = 900;
+  const agentSpokeEndAtRef = useRef(0);
+  const agentSpokeRecently = () =>
+    speakingRef.current || Date.now() - agentSpokeEndAtRef.current < AGENT_ECHO_HANGOVER_MS;
   const setRecordingSync = (v: boolean) => {
     recordingRef.current = v;
     setRecording(v);
@@ -1054,7 +1069,7 @@ export function OpenVoiceConsole({
    * non-streamed askModel+speak on any streaming error.
    */
   const respondAndSpeak = async (instructions: string): Promise<string> => {
-    const finalInstructions = `${instructions}\n\nVOICE MODE — CRITICAL: this is spoken aloud, not read. Keep your ENTIRE reply to 3 short sentences maximum: up to two statements that add something concrete to the world, then exactly one question. ALWAYS end on the question — it hands the turn back to the player.\n\n${OUTPUT_FORMAT_GUARD}`;
+    const finalInstructions = `${instructions}\n\nVOICE MODE — CRITICAL: this is spoken aloud, not read. Keep your ENTIRE reply to 4 short sentences maximum: one that clearly sums up what the player just added, one or two that contribute NEW named world-facts, then exactly one question. ALWAYS end on the question — it hands the turn back to the player.\n\n${OUTPUT_FORMAT_GUARD}`;
     const myToken = ++speakTokenRef.current;
     // Abort any prior stream and silence any audio still playing from a
     // previous turn — guarantees a single voice, no leftover speech.
@@ -1153,8 +1168,39 @@ export function OpenVoiceConsole({
       if (speakTokenRef.current === myToken && buffer.trim()) {
         if (firstAudio && !/[.!?]['")\]]*\s*$/.test(buffer)) {
           droppedTail = true;
+          shipTelemetry("stream_truncated", { tail: buffer.trim().slice(0, 80) });
         } else {
           enqueue(buffer);
+        }
+      }
+      // Self-repair: a reply that doesn't end on a question leaves the player
+      // hanging — the agent falls silent mid-thought and the game reads as
+      // broken ("it stopped speaking and just said Waiting"). Whether from a
+      // mid-stream drop, a safety filter, or the model forgetting, generate
+      // the missing hand-back question and speak it.
+      if (
+        firstAudio &&
+        speakTokenRef.current === myToken &&
+        spokenText &&
+        !/\?["')\]]*\s*$/.test(spokenText)
+      ) {
+        try {
+          const r2 = await fetch(withBase("/api/voice-turn"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              instructions: `You are mid-conversation in a spoken worldbuilding game. Your reply below got cut off before its closing question. Say ONE short, open question (max 14 words) that hands the turn back to the player, continuing naturally from the reply. Output the question only — no preamble.\n\nREPLY SO FAR: ${spokenText.slice(-400)}`,
+              maxTokens: 40,
+            }),
+          });
+          const data = await r2.json().catch(() => ({}));
+          const q = sanitizeModelReply(String(data?.text ?? "")).trim();
+          if (q && /\?/.test(q) && speakTokenRef.current === myToken) {
+            shipTelemetry("reply_repaired", { q: q.slice(0, 80) });
+            enqueue(q);
+          }
+        } catch {
+          // Repair is best-effort; the turn still ends and the mic is live.
         }
       }
     } catch (e) {
@@ -2197,9 +2243,19 @@ export function OpenVoiceConsole({
               }`
             );
           }
-          if (isSpeech) {
+          // Post-speech echo hangover: right after the agent's audio ends its
+          // tail rings into the mic (speakers, no hardware AEC) and used to
+          // start a phantom capture that became a 1-2 word "user turn". In the
+          // hangover, demand a genuinely LOUD, sustained onset — a real player
+          // interrupting clears it easily; residual echo (~0.02-0.05) does not.
+          const echoHang = agentSpokeRecently();
+          const onsetOk = echoHang
+            ? rms > Math.max(VAD_BARGE_MIN_RMS, noiseFloorRef.current * VAD_BARGE_MULTIPLIER)
+            : isSpeech;
+          const onsetMs = echoHang ? VAD_ONSET_MS + 120 : VAD_ONSET_MS;
+          if (onsetOk) {
             if (speechOnsetSinceRef.current === null) speechOnsetSinceRef.current = now;
-            if (now - speechOnsetSinceRef.current >= VAD_ONSET_MS) {
+            if (now - speechOnsetSinceRef.current >= onsetMs) {
               speechOnsetSinceRef.current = null;
               quietVoiceSinceRef.current = null;
               beginCapture(now);
@@ -2377,23 +2433,27 @@ export function OpenVoiceConsole({
     // its onboarding poisoned by the fragment "and how do" this way. Long
     // utterances are exempt: a player genuinely quoting 12+ words back is
     // speech, not echo.
-    // 2-6 words only: real echo fragments observed live were 3-5 words ("and
-    // how do"). A SINGLE word is almost always a legitimate answer even when
-    // it appears in the agent's speech — players constantly answer with a
-    // word from the question ("Which wins?" → "Pain") and discarding that
-    // reads as "the game ignores me". Longer answers (7+) that quote the
-    // scripted question are also legitimate.
+    // Echo rejection has TWO paths, because the discriminator is timing:
+    //  (a) SUBSTRING match — a 2-6 word capture that appears verbatim in the
+    //      agent's recent speech is echo whenever it lands ("and how do").
+    //  (b) TIMING — any short (1-4 word) capture that completes while the
+    //      agent is still speaking or just finished (agentSpokeRecently) is
+    //      echo even if ASR garbled it past a substring match. This is what
+    //      was cutting the agent off: its own tail became a 1-2 word "turn".
+    // Outside the echo window a 1-word capture is a legitimate answer (players
+    // reply with one word from the question — "Which wins?" → "Pain") and
+    // passes; that path is why (b) is gated on agentSpokeRecently().
     const normEcho = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
     const tNorm = normEcho(t);
     const tWords = tNorm ? tNorm.split(" ").length : 0;
-    if (tWords >= 2 && tWords <= 6) {
-      const recentAgentSpeech = [bibleRef.current.lastAiUtterance ?? "", GREETING_TEXT]
-        .concat(historyRef.current.filter((m) => m.role === "assistant").slice(-2).map((m) => m.content));
-      if (recentAgentSpeech.some((s) => s && normEcho(s).includes(tNorm))) {
-        addLine("sys", "Ignored an echo of the agent's own voice.");
-        shipTelemetry("echo_discarded", { text: t.slice(0, 80) });
-        return;
-      }
+    const recentAgentSpeech = [bibleRef.current.lastAiUtterance ?? "", GREETING_TEXT]
+      .concat(historyRef.current.filter((m) => m.role === "assistant").slice(-2).map((m) => m.content));
+    const substringEcho = tWords >= 2 && tWords <= 6 && recentAgentSpeech.some((s) => s && normEcho(s).includes(tNorm));
+    const timingEcho = tWords >= 1 && tWords <= 4 && agentSpokeRecently();
+    if (substringEcho || timingEcho) {
+      addLine("sys", "Ignored an echo of the agent's own voice.");
+      shipTelemetry("echo_discarded", { text: t.slice(0, 80), reason: substringEcho ? "substring" : "timing" });
+      return;
     }
     // Continuation merge (unmute-style): the player resumed talking after a
     // turn-end fired, and the reply to the first fragment hasn't made a sound

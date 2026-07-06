@@ -63,12 +63,16 @@ main {
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 8px;
+  /* Stack the logo on top of a compact 2x2 button grid (matches the target
+     menu mock): logo row, then New Game / Rules / Settings / Saved. */
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
   /* Above the sidebar (z-index 5) so the Saved dropdown overlays it. */
   z-index: 20;
   /* Hug the content — the old fixed 560px card left a large empty beige
      square around four small buttons. */
-  padding: 6px 8px 8px;
+  padding: 10px 12px 12px;
   width: fit-content;
   max-width: min(560px, calc(100vw - 24px));
   background: rgba(241, 197, 154, 0.92);
@@ -113,9 +117,16 @@ main {
   font-size: 14px;
 }
 .hudNav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  /* 2x2 grid: New Game / Rules on the first row, Settings / Saved on the
+     second — the compact arrangement in the target menu mock. */
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.hudNav > button,
+.hudNav .savedMenu,
+.hudNav .savedMenu > button {
+  width: 100%;
 }
 .logoPixel,
 .hudNav button,

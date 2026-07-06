@@ -834,6 +834,40 @@ export function OpenVoiceConsole({
       sources.push(src);
     };
 
+    // COALESCE network chunks into large scheduled buffers. The 24kHz PCM is
+    // resampled to the context rate (usually 48kHz) independently PER
+    // AudioBufferSource, and each buffer edge is interpolated as if silence
+    // surrounds it — so scheduling every small network chunk as its own
+    // source puts an audible tick/gap at every seam, dozens per reply
+    // ("the voice is chopping up", even with delivery measured at 3-4x
+    // realtime). Big buffers = few seams. The first flush stays small so
+    // time-to-first-sound doesn't regress, and a low-water guard flushes
+    // early if playback is about to catch up with what we're holding.
+    let pendingPcm: Uint8Array[] = [];
+    let pendingBytes = 0;
+    let firstFlushDone = false;
+    const flushPcm = () => {
+      if (!pendingBytes) return;
+      const merged = new Uint8Array(pendingBytes);
+      let o = 0;
+      for (const c of pendingPcm) {
+        merged.set(c, o);
+        o += c.length;
+      }
+      pendingPcm = [];
+      pendingBytes = 0;
+      firstFlushDone = true;
+      schedulePcm(merged);
+    };
+    const queuePcm = (bytes: Uint8Array) => {
+      pendingPcm.push(bytes);
+      pendingBytes += bytes.length;
+      // ~1s of 16-bit mono audio after start; ~0.25s for the first sound.
+      const threshold = (firstFlushDone ? 1.0 : 0.25) * sampleRate * 2;
+      const runningDry = firstFlushDone && cursor - ctx.currentTime < 0.35;
+      if (pendingBytes >= threshold || runningDry) flushPcm();
+    };
+
     // Parse RIFF/WAVE header to find the sample rate + start of PCM data.
     const tryParseHeader = (): boolean => {
       if (header.length < 44) return false;
@@ -848,7 +882,7 @@ export function OpenVoiceConsole({
         if (id === "data") {
           const pcmStart = off + 8;
           pcmStarted = true;
-          if (header.length > pcmStart) schedulePcm(header.slice(pcmStart));
+          if (header.length > pcmStart) queuePcm(header.slice(pcmStart));
           return true;
         }
         off += 8 + size + (size % 2);
@@ -868,7 +902,7 @@ export function OpenVoiceConsole({
           const value = f.chunks[next++];
           if (!value || value.length === 0) continue;
           if (pcmStarted) {
-            schedulePcm(value);
+            queuePcm(value);
           } else {
             const merged = new Uint8Array(header.length + value.length);
             merged.set(header);
@@ -888,6 +922,8 @@ export function OpenVoiceConsole({
         });
         f.notify = null;
       }
+      // Stream ended — schedule whatever is still held in the coalescer.
+      flushPcm();
       // Wait for the scheduled audio to actually finish (or be interrupted).
       if (!stopped && token === speakTokenRef.current) {
         await new Promise<void>((resolve) => {

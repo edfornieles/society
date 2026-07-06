@@ -316,6 +316,9 @@ export function OpenVoiceConsole({
   // so consecutive sentences schedule gaplessly on the AudioContext clock.
   const streamStopRef = useRef<(() => void) | null>(null);
   const streamPlayheadRef = useRef<number>(0);
+  // Every in-flight TTS prefetch (see startTtsFetch) — barge-in/new-turn must
+  // abort the PREFETCHED sentences too, not just the one currently playing.
+  const activeTtsFetchesRef = useRef<Set<{ abort: () => void }>>(new Set());
   const waveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const waveRafRef = useRef<number | null>(null);
   const startModeRef = useRef<"new" | "continue" | "recap">("new");
@@ -673,40 +676,87 @@ export function OpenVoiceConsole({
   };
 
   /**
-   * Low-latency streaming playback: fetch the TTS WAV as a STREAM and start
-   * playing PCM the instant the first ~384ms chunk arrives (vs waiting ~900ms+
-   * for the whole clip). Pocket-TTS streams 16-bit mono PCM; we parse the WAV
-   * header once, then convert each network chunk to an AudioBuffer and schedule
-   * it back-to-back on the shared AudioContext clock. Resolves when playback
-   * finishes. Throws on any setup failure so the caller can fall back to the
-   * buffered playBlob path (keeping the voice robust).
+   * TTS prefetch: start the /api/tts fetch NOW and buffer its chunks, so
+   * sentence N+1's synthesis + network happen WHILE sentence N is playing —
+   * the ~0.4-0.9s first-byte wait used to land as an audible gap between
+   * every pair of spoken sentences. Playback consumes the buffer via
+   * playTtsFromFetch below.
    */
-  const playTtsStream = async (text: string, token: number): Promise<void> => {
-    if (token !== speakTokenRef.current) return;
+  type TtsFetch = {
+    text: string;
+    chunks: Uint8Array[];
+    done: boolean;
+    error: unknown;
+    notify: (() => void) | null;
+    abort: () => void;
+  };
+
+  const startTtsFetch = (text: string): TtsFetch => {
+    const ctrl = new AbortController();
+    const f: TtsFetch = {
+      text,
+      chunks: [],
+      done: false,
+      error: null,
+      notify: null,
+      abort: () => {
+        try { ctrl.abort(); } catch {}
+      },
+    };
+    activeTtsFetchesRef.current.add(f);
+    void (async () => {
+      try {
+        const r = await fetch(withBase("/api/tts"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal: ctrl.signal,
+        });
+        if (!r.ok || !r.body) throw new Error(`TTS stream failed (${r.status})`);
+        const reader = r.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.length) {
+            f.chunks.push(value);
+            f.notify?.();
+          }
+        }
+      } catch (e) {
+        f.error = e;
+      } finally {
+        f.done = true;
+        f.notify?.();
+        activeTtsFetchesRef.current.delete(f);
+      }
+    })();
+    return f;
+  };
+
+  /**
+   * Low-latency streaming playback from a (possibly still-downloading) TTS
+   * prefetch: parse the WAV header once, then convert each chunk to an
+   * AudioBuffer and schedule it back-to-back on the shared AudioContext
+   * clock. Resolves when playback finishes. Throws if the fetch failed before
+   * any audio was scheduled, so the caller can fall back to buffered playBlob.
+   */
+  const playTtsFromFetch = async (f: TtsFetch, token: number): Promise<void> => {
+    if (token !== speakTokenRef.current) {
+      f.abort();
+      return;
+    }
     const ctx = await ensureAudioContext();
-    const abort = new AbortController();
     const sources: AudioBufferSourceNode[] = [];
     let stopped = false;
     const stop = () => {
       stopped = true;
-      try { abort.abort(); } catch {}
+      f.abort();
       for (const s of sources) {
         try { s.stop(); } catch {}
         try { s.disconnect(); } catch {}
       }
     };
     streamStopRef.current = stop;
-
-    const r = await fetch(withBase("/api/tts"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: abort.signal,
-    });
-    if (!r.ok || !r.body) {
-      if (streamStopRef.current === stop) streamStopRef.current = null;
-      throw new Error(`TTS stream failed (${r.status})`);
-    }
 
     // Waveform reactivity: all scheduled sources feed a gain → analyser → output.
     const gain = ctx.createGain();
@@ -778,21 +828,36 @@ export function OpenVoiceConsole({
     };
 
     try {
-      const reader = r.body.getReader();
+      // Consume the prefetch buffer: chunks already downloaded play through
+      // immediately; if the download is still in flight we wait for the next
+      // chunk (the notify handshake re-checks state after arming to close the
+      // producer/consumer race).
+      let next = 0;
       while (true) {
         if (stopped || token !== speakTokenRef.current) { stop(); break; }
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value || value.length === 0) continue;
-        if (pcmStarted) {
-          schedulePcm(value);
-        } else {
-          const merged = new Uint8Array(header.length + value.length);
-          merged.set(header);
-          merged.set(value, header.length);
-          header = merged;
-          tryParseHeader();
+        if (next < f.chunks.length) {
+          const value = f.chunks[next++];
+          if (!value || value.length === 0) continue;
+          if (pcmStarted) {
+            schedulePcm(value);
+          } else {
+            const merged = new Uint8Array(header.length + value.length);
+            merged.set(header);
+            merged.set(value, header.length);
+            header = merged;
+            tryParseHeader();
+          }
+          continue;
         }
+        if (f.done) {
+          if (f.error && !pcmStarted) throw f.error;
+          break;
+        }
+        await new Promise<void>((resolve) => {
+          f.notify = resolve;
+          if (f.chunks.length > next || f.done) resolve();
+        });
+        f.notify = null;
       }
       // Wait for the scheduled audio to actually finish (or be interrupted).
       if (!stopped && token === speakTokenRef.current) {
@@ -836,6 +901,12 @@ export function OpenVoiceConsole({
       // ignore
     }
     streamStopRef.current = null;
+    // Abort every PREFETCHED sentence too — without this, barge-in kills the
+    // playing sentence but queued fetches keep downloading a dead reply.
+    for (const f of activeTtsFetchesRef.current) {
+      try { f.abort(); } catch {}
+    }
+    activeTtsFetchesRef.current.clear();
     streamPlayheadRef.current = 0;
     stopWaveformLoop();
   };
@@ -876,11 +947,17 @@ export function OpenVoiceConsole({
     setTtsError("");
     setSpeakingSync(true);
     try {
+      // Prefetch every sentence up front (2-4 for a spoken reply): Pocket-TTS
+      // synthesizes the queue server-side while earlier sentences play.
+      const prefetches = sentences.map((s) => startTtsFetch(s));
       for (let i = 0; i < sentences.length; i++) {
-        if (speakTokenRef.current !== myToken) break;
+        if (speakTokenRef.current !== myToken) {
+          prefetches.slice(i).forEach((p) => p.abort());
+          break;
+        }
         // Stream each sentence for low latency; fall back to buffered playback.
         try {
-          await playTtsStream(sentences[i], myToken);
+          await playTtsFromFetch(prefetches[i], myToken);
         } catch {
           const blob = await fetchTtsBlob(sentences[i]);
           if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
@@ -942,12 +1019,18 @@ export function OpenVoiceConsole({
         setSendingSync(false);
         setSpeakingSync(true);
       }
+      // Fetch starts NOW — sentence N+1 synthesizes while N plays, so the
+      // TTS first-byte wait no longer lands as a gap between sentences.
+      const prefetch = startTtsFetch(clean);
       playChain = playChain.then(async () => {
-        if (speakTokenRef.current !== myToken) return;
+        if (speakTokenRef.current !== myToken) {
+          prefetch.abort();
+          return;
+        }
         // Stream the sentence (first audio at ~384ms). Fall back to buffered
         // playback if streaming setup fails, so a sentence is never lost.
         try {
-          await playTtsStream(clean, myToken);
+          await playTtsFromFetch(prefetch, myToken);
         } catch {
           const blob = await fetchTtsBlob(clean);
           if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
@@ -1096,11 +1179,22 @@ export function OpenVoiceConsole({
     // for the whole session.
     if (!lastAiText?.trim()) return;
     const requestSessionId = sessionIdRef.current;
+    // Send only what the canon-tracker prompt actually reads
+    // (bibleSummaryForModel: last 12 changelog entries, last 8 threads, core
+    // values, last utterance) — the full bible grows ~3 changelog entries per
+    // turn without bound, so by turn 30 this upload was ~15-20KB of dead weight
+    // on every single turn.
+    const b = bibleRef.current;
+    const prunedBible = {
+      ...b,
+      changelog: b.changelog.slice(-12),
+      openThreads: b.openThreads.slice(-8),
+    };
     try {
       const r = await fetch(withBase("/api/bible-update"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bible: bibleRef.current, lastAiTranscript: lastAiText }),
+        body: JSON.stringify({ bible: prunedBible, lastAiTranscript: lastAiText }),
       });
       if (!r.ok) return;
       const data = await r.json().catch(() => null);

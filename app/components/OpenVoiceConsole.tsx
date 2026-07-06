@@ -947,22 +947,27 @@ export function OpenVoiceConsole({
     setTtsError("");
     setSpeakingSync(true);
     try {
-      // Prefetch every sentence up front (2-4 for a spoken reply): Pocket-TTS
-      // synthesizes the queue server-side while earlier sentences play.
-      const prefetches = sentences.map((s) => startTtsFetch(s));
+      // ONE-AHEAD prefetch: sentence N+1 starts synthesizing exactly when N
+      // starts playing. Never more — Pocket-TTS is a single local process,
+      // and 3 concurrent syntheses each stream SLOWER than realtime, which
+      // underruns playback (chopping) and starves the final sentence.
+      let pending: TtsFetch | null = sentences.length ? startTtsFetch(sentences[0]) : null;
       for (let i = 0; i < sentences.length; i++) {
         if (speakTokenRef.current !== myToken) {
-          prefetches.slice(i).forEach((p) => p.abort());
+          pending?.abort();
           break;
         }
+        const current = pending!;
+        pending = i + 1 < sentences.length ? startTtsFetch(sentences[i + 1]) : null;
         // Stream each sentence for low latency; fall back to buffered playback.
         try {
-          await playTtsFromFetch(prefetches[i], myToken);
+          await playTtsFromFetch(current, myToken);
         } catch {
           const blob = await fetchTtsBlob(sentences[i]);
           if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
         }
       }
+      pending?.abort();
     } finally {
       // Only clear "speaking" if we're still the current turn. If we were
       // interrupted, cancelSpeech() already cleared it and started capturing —
@@ -1005,6 +1010,13 @@ export function OpenVoiceConsole({
     // the recorded reply must then also exclude it (history = what was heard).
     let droppedTail = false;
     let playChain: Promise<void> = Promise.resolve();
+    // ONE-AHEAD prefetch queue: the first sentence's TTS fetch fires
+    // immediately; each later sentence's fetch fires when the PREVIOUS one
+    // starts playing. The LLM can emit sentences faster than they play, and
+    // fetching them all at once put 3+ concurrent syntheses on the single
+    // Pocket-TTS process — each streamed slower than realtime, underrunning
+    // playback (audible chopping, ragged reply endings).
+    const ttsQueue: { text: string; fetch: TtsFetch | null }[] = [];
 
     const enqueue = (sentence: string) => {
       const clean = sanitizeModelReply(sentence).trim();
@@ -1019,20 +1031,24 @@ export function OpenVoiceConsole({
         setSendingSync(false);
         setSpeakingSync(true);
       }
-      // Fetch starts NOW — sentence N+1 synthesizes while N plays, so the
-      // TTS first-byte wait no longer lands as a gap between sentences.
-      const prefetch = startTtsFetch(clean);
+      const item: { text: string; fetch: TtsFetch | null } = { text: clean, fetch: null };
+      ttsQueue.push(item);
+      if (ttsQueue.length === 1) item.fetch = startTtsFetch(clean);
       playChain = playChain.then(async () => {
         if (speakTokenRef.current !== myToken) {
-          prefetch.abort();
+          item.fetch?.abort();
           return;
         }
+        if (!item.fetch) item.fetch = startTtsFetch(item.text);
+        // About to play this one — start synthesizing the next.
+        const next = ttsQueue[ttsQueue.indexOf(item) + 1];
+        if (next && !next.fetch) next.fetch = startTtsFetch(next.text);
         // Stream the sentence (first audio at ~384ms). Fall back to buffered
         // playback if streaming setup fails, so a sentence is never lost.
         try {
-          await playTtsFromFetch(prefetch, myToken);
+          await playTtsFromFetch(item.fetch, myToken);
         } catch {
-          const blob = await fetchTtsBlob(clean);
+          const blob = await fetchTtsBlob(item.text);
           if (blob && speakTokenRef.current === myToken) await playBlob(blob, myToken);
         }
       });

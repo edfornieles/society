@@ -2286,14 +2286,22 @@ export function OpenVoiceConsole({
             // waiting for you to speak while I'm speaking" dead end. Start
             // the capture anyway and say so in the console (always on), so a
             // silent failure becomes a diagnosable one.
-            const voiceish = rms > Math.max(0.02, noiseFloorRef.current * 1.5);
+            // More sensitive than before (0.014/1.25x/1000ms, was
+            // 0.02/1.5x/2000ms): a too-high calibration used to lock BOTH the
+            // speech threshold AND this rescue above a quiet/distant mic,
+            // trapping the session in "Waiting for you to speak" permanently.
+            const voiceish = rms > Math.max(0.014, noiseFloorRef.current * 1.25) && !echoHang;
             if (voiceish) {
               if (quietVoiceSinceRef.current === null) quietVoiceSinceRef.current = now;
-              if (now - quietVoiceSinceRef.current >= 2000) {
+              if (now - quietVoiceSinceRef.current >= 1000) {
                 quietVoiceSinceRef.current = null;
+                // The rescue firing MEANS the calibrated floor is too high for
+                // this mic — correct it downward so the NORMAL onset works for
+                // the rest of the session (self-heal, not a per-turn rescue).
+                noiseFloorRef.current = Math.min(noiseFloorRef.current, rms * 0.5);
                 // eslint-disable-next-line no-console
                 console.info(
-                  `[VAD] quiet-mic rescue: sustained voice-level sound (rms=${rms.toFixed(4)}) under speech threshold (${speechThreshold.toFixed(4)}) — capturing anyway. Mic may be too quiet or too far away.`
+                  `[VAD] quiet-mic rescue: rms=${rms.toFixed(4)} under speechThr=${speechThreshold.toFixed(4)} — capturing + lowering floor to ${noiseFloorRef.current.toFixed(4)}. Mic may be quiet/far.`
                 );
                 shipTelemetry("quiet_mic_rescue", { rms: Number(rms.toFixed(4)), thr: Number(speechThreshold.toFixed(4)) });
                 beginCapture(now);

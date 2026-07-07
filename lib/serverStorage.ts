@@ -374,11 +374,19 @@ export async function putTelemetryBatch(sessionId: string, events: unknown[]): P
 }
 
 export async function getTelemetry(sessionId: string, sinceMs: number): Promise<unknown[]> {
+  // Hard cap on batch files fetched per call: a long session flushes a batch
+  // every ~3s, so an unbounded fetch could fan out to thousands of R2
+  // subrequests in ONE Worker invocation and blow the CPU/subrequest limit
+  // (Error 1102). Only ever read the most recent MAX_BATCHES.
+  const MAX_BATCHES = 120;
   const tsOf = (name: string) => Number(name.split("/").pop()?.replace(".json", "") ?? NaN);
   if (driver === "local") {
     const fs = await import("fs/promises");
     const dir = await ensureLocalDir("data", "debug-logs", sessionId);
-    const files = (await fs.readdir(dir)).filter((f) => f.endsWith(".json") && tsOf(f) >= sinceMs).sort();
+    const files = (await fs.readdir(dir))
+      .filter((f) => f.endsWith(".json") && tsOf(f) >= sinceMs)
+      .sort()
+      .slice(-MAX_BATCHES);
     const batches = await Promise.all(
       files.map(async (f) => {
         try {
@@ -392,12 +400,13 @@ export async function getTelemetry(sessionId: string, sinceMs: number): Promise<
   }
   const s3 = getS3();
   const out = await s3.send(
-    new ListObjectsV2Command({ Bucket: r2Bucket, Prefix: `debug-logs/${sessionId}/` })
+    new ListObjectsV2Command({ Bucket: r2Bucket, Prefix: `debug-logs/${sessionId}/`, MaxKeys: 1000 })
   );
   const keys = (out.Contents ?? [])
     .map((c) => c.Key || "")
     .filter((k) => k.endsWith(".json") && tsOf(k) >= sinceMs)
-    .sort();
+    .sort()
+    .slice(-MAX_BATCHES);
   const batches = await Promise.all(
     keys.map(async (key) => {
       try {

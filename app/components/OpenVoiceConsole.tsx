@@ -1916,14 +1916,18 @@ export function OpenVoiceConsole({
   // above residual echo (the model's own voice after cancellation, ~0.02-0.04)
   // but well below normal speech (~0.1). Headphones remove echo entirely and
   // make this even more reliable.
-  // Lowered 2026-07-06 (0.045/1.6/130 required a slightly raised voice —
-  // player couldn't reliably cut in): normal speech (~0.05-0.15 rms) held for
-  // ~a syllable now interrupts, while residual post-AEC echo of the model's
-  // own voice (~0.02-0.03) still sits under the bar. Headphones make this
-  // near-perfect; speakers depend on the browser's echo cancellation.
-  const VAD_BARGE_MIN_RMS = 0.035;
-  const VAD_BARGE_MULTIPLIER = 1.35;
-  const VAD_BARGE_MS = 90;
+  // Raised 2026-07-07 after live telemetry showed the agent cutting ITSELF
+  // off: on speakers (imperfect browser AEC) the model's own voice echoed
+  // into the mic at ~0.047 rms and tripped the 0.035 barge threshold, so it
+  // interrupted itself mid-sentence — repeatedly, which sounds like choppy,
+  // broken speech. The bar now sits clearly ABOVE the residual-echo band
+  // (~0.02-0.05) and requires a longer sustain: a brief echo peak can't hold
+  // 150ms, but a real interrupting voice easily does. Genuine barges measured
+  // in that same session (0.083, 0.42) still clear it. Headphones remove echo
+  // entirely and make interruption effortless regardless.
+  const VAD_BARGE_MIN_RMS = 0.07;
+  const VAD_BARGE_MULTIPLIER = 1.8;
+  const VAD_BARGE_MS = 150;
   // Hysteresis: STARTING a turn uses the strict speech threshold (avoids phantom
   // starts), but once capturing, "still talking" uses a much LOWER bar so the
   // quiet dips between words/syllables aren't mistaken for the end of the turn

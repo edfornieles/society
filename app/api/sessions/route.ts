@@ -3,10 +3,12 @@ import { listSessionsFromStorage, putSessionToStorage } from "@/lib/serverStorag
 
 export const runtime = "nodejs";
 
-/** GET /api/sessions — list all saved sessions (id + title + timestamps only) */
-export async function GET() {
+/** GET /api/sessions — list THIS browser's saved sessions (per-user via the
+ *  x-society-cid header; id + title + timestamps only) */
+export async function GET(req: Request) {
   try {
-    const sessions = await listSessionsFromStorage();
+    const cid = req.headers.get("x-society-cid") ?? "";
+    const sessions = await listSessionsFromStorage(cid);
     return NextResponse.json(sessions);
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message) }, { status: 500 });
@@ -37,7 +39,8 @@ export async function POST(req: Request) {
       updatedAt: Date.now(),
     };
 
-    await putSessionToStorage(sanitized);
+    const cid = req.headers.get("x-society-cid") ?? "";
+    await putSessionToStorage(sanitized, cid);
 
     return NextResponse.json({ ok: true });
   } catch (e: any) {

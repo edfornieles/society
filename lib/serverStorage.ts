@@ -113,11 +113,35 @@ function contentTypeFor(key: string): string {
   return CONTENT_TYPES[ext] || "application/octet-stream";
 }
 
-export async function listSessionsFromStorage(): Promise<Array<{ id: string; title: string; createdAt: number; updatedAt: number }>> {
+// Per-user session scoping (anonymous, no login). A client-generated id (from
+// localStorage, sent as the x-society-cid header) scopes each browser's saved
+// games under u/{cid}/ so users only ever see + list their OWN games. This
+// isolates players AND fixes the load problem behind the recurring Error 1102:
+// a list is now just one user's handful of games, not all sessions globally.
+// An empty cid falls back to the legacy flat sessions/ prefix (backward compat
+// for storage-blocked browsers, and where the pre-scoping global games live).
+function sanitizeCid(cid: string | undefined | null): string {
+  return String(cid || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
+}
+function sessionJsonKey(cid: string, id: string): string {
+  return cid ? `u/${cid}/${id}.json` : `sessions/${id}.json`;
+}
+function sessionMdKey(cid: string, id: string): string {
+  return cid ? `u/${cid}/${id}.md` : `sessions/${id}.md`;
+}
+function sessionPrefix(cid: string): string {
+  return cid ? `u/${cid}/` : "sessions/";
+}
+async function sessionsLocalDir(cid: string): Promise<string> {
+  return cid ? ensureLocalDir("data", "sessions", "u", cid) : ensureLocalDir("data", "sessions");
+}
+
+export async function listSessionsFromStorage(cidRaw = ""): Promise<Array<{ id: string; title: string; createdAt: number; updatedAt: number }>> {
+  const cid = sanitizeCid(cidRaw);
   if (driver === "local") {
     const fs = await import("fs/promises");
-    const sessionsDir = await ensureLocalDir("data", "sessions");
-    const files = await fs.readdir(sessionsDir);
+    const sessionsDir = await sessionsLocalDir(cid);
+    const files = await fs.readdir(sessionsDir).catch(() => [] as string[]);
     const sessions = await Promise.all(
       files
         .filter((f) => f.endsWith(".json"))
@@ -150,7 +174,7 @@ export async function listSessionsFromStorage(): Promise<Array<{ id: string; tit
   const out = await s3.send(
     new ListObjectsV2Command({
       Bucket: r2Bucket,
-      Prefix: "sessions/",
+      Prefix: sessionPrefix(cid),
       MaxKeys: 1000,
     })
   );
@@ -200,30 +224,33 @@ export async function listSessionsFromStorage(): Promise<Array<{ id: string; tit
     }>;
 }
 
-export async function getSessionFromStorage(id: string): Promise<SessionRecord | null> {
+export async function getSessionFromStorage(id: string, cidRaw = ""): Promise<SessionRecord | null> {
+  const cid = sanitizeCid(cidRaw);
   if (driver === "local") {
-    try {
-      const fs = await import("fs/promises");
-      const sessionsDir = await ensureLocalDir("data", "sessions");
-      const raw = await fs.readFile(await localPathJoin(sessionsDir, `${id}.json`), "utf-8");
-      return JSON.parse(raw);
-    } catch {
-      return null;
+    const fs = await import("fs/promises");
+    // Scoped first, then legacy flat location — lets a returning player resume
+    // a pre-scoping game (it migrates to their scope on next save).
+    for (const dir of cid ? [await sessionsLocalDir(cid), await ensureLocalDir("data", "sessions")] : [await ensureLocalDir("data", "sessions")]) {
+      try {
+        const raw = await fs.readFile(await localPathJoin(dir, `${id}.json`), "utf-8");
+        return JSON.parse(raw);
+      } catch {
+        // try next location
+      }
     }
-  }
-  try {
-    const s3 = getS3();
-    const obj = await s3.send(
-      new GetObjectCommand({
-        Bucket: r2Bucket,
-        Key: `sessions/${id}.json`,
-      })
-    );
-    const raw = await streamToString(obj.Body);
-    return JSON.parse(raw);
-  } catch {
     return null;
   }
+  const s3 = getS3();
+  const keys = cid ? [sessionJsonKey(cid, id), `sessions/${id}.json`] : [`sessions/${id}.json`];
+  for (const Key of keys) {
+    try {
+      const obj = await s3.send(new GetObjectCommand({ Bucket: r2Bucket, Key }));
+      return JSON.parse(await streamToString(obj.Body));
+    } catch {
+      // fall through to the next candidate (scoped miss -> legacy)
+    }
+  }
+  return null;
 }
 
 function buildSessionMarkdown(data: SessionRecord): string {
@@ -259,15 +286,16 @@ function buildSessionMarkdown(data: SessionRecord): string {
     .join("\n");
 }
 
-export async function putSessionToStorage(data: SessionRecord): Promise<void> {
+export async function putSessionToStorage(data: SessionRecord, cidRaw = ""): Promise<void> {
   const id = String(data.id ?? "").trim();
   if (!id) throw new Error("Missing session id");
+  const cid = sanitizeCid(cidRaw);
 
   const md = buildSessionMarkdown(data);
 
   if (driver === "local") {
     const fs = await import("fs/promises");
-    const sessionsDir = await ensureLocalDir("data", "sessions");
+    const sessionsDir = await sessionsLocalDir(cid);
     await fs.writeFile(await localPathJoin(sessionsDir, `${id}.json`), JSON.stringify(data, null, 2), "utf-8");
     await fs.writeFile(await localPathJoin(sessionsDir, `${id}.md`), md, "utf-8");
     return;
@@ -277,7 +305,7 @@ export async function putSessionToStorage(data: SessionRecord): Promise<void> {
   await s3.send(
     new PutObjectCommand({
       Bucket: r2Bucket,
-      Key: `sessions/${id}.json`,
+      Key: sessionJsonKey(cid, id),
       Body: JSON.stringify(data, null, 2),
       ContentType: "application/json; charset=utf-8",
     })
@@ -285,17 +313,18 @@ export async function putSessionToStorage(data: SessionRecord): Promise<void> {
   await s3.send(
     new PutObjectCommand({
       Bucket: r2Bucket,
-      Key: `sessions/${id}.md`,
+      Key: sessionMdKey(cid, id),
       Body: md,
       ContentType: "text/markdown; charset=utf-8",
     })
   );
 }
 
-export async function deleteSessionFromStorage(id: string): Promise<void> {
+export async function deleteSessionFromStorage(id: string, cidRaw = ""): Promise<void> {
+  const cid = sanitizeCid(cidRaw);
   if (driver === "local") {
     const fs = await import("fs/promises");
-    const sessionsDir = await ensureLocalDir("data", "sessions");
+    const sessionsDir = await sessionsLocalDir(cid);
     await fs.unlink(await localPathJoin(sessionsDir, `${id}.json`)).catch(() => {});
     await fs.unlink(await localPathJoin(sessionsDir, `${id}.md`)).catch(() => {});
     await fs.rm(await localPathJoin(process.cwd(), "data", "media", "game-images", id), { recursive: true, force: true }).catch(() => {});
@@ -303,8 +332,8 @@ export async function deleteSessionFromStorage(id: string): Promise<void> {
   }
 
   const s3 = getS3();
-  await s3.send(new DeleteObjectCommand({ Bucket: r2Bucket, Key: `sessions/${id}.json` })).catch(() => {});
-  await s3.send(new DeleteObjectCommand({ Bucket: r2Bucket, Key: `sessions/${id}.md` })).catch(() => {});
+  await s3.send(new DeleteObjectCommand({ Bucket: r2Bucket, Key: sessionJsonKey(cid, id) })).catch(() => {});
+  await s3.send(new DeleteObjectCommand({ Bucket: r2Bucket, Key: sessionMdKey(cid, id) })).catch(() => {});
 
   const listed = await s3.send(
     new ListObjectsV2Command({

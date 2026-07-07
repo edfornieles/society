@@ -3,6 +3,7 @@ import { createEmptyBible } from "./societyBible";
 import { extractCoreTopicPhrase, normalizeCoreValueUtterance } from "./coreValueNormalize";
 import type { GeneratedImage } from "@/lib/generatedImage";
 import { withBase } from "./basePath";
+import { clientIdHeaders } from "./clientId";
 
 export type SavedGame = {
   id: string;
@@ -218,7 +219,7 @@ export async function saveGame(game: SavedGame): Promise<void> {
   }).game;
   const r = await fetch(API_BASE, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...clientIdHeaders() },
     body: JSON.stringify(normalized),
   });
   if (!r.ok) {
@@ -240,7 +241,7 @@ export async function listGames(): Promise<Pick<SavedGame, "id" | "createdAt" | 
  *  "you have no saved societies" from "the list couldn't be loaded" (an empty
  *  list on a transient error reads as data loss to the player). */
 export async function listGamesStrict(): Promise<Pick<SavedGame, "id" | "createdAt" | "title">[]> {
-  const r = await fetch(API_BASE);
+  const r = await fetch(API_BASE, { headers: clientIdHeaders() });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
     console.warn("[listGames]", r.status, detail);
@@ -255,13 +256,13 @@ export async function listGamesStrict(): Promise<Pick<SavedGame, "id" | "created
 }
 
 export async function getGame(id: string): Promise<SavedGame | null> {
-  const r = await fetch(`${API_BASE}/${id}`);
+  const r = await fetch(`${API_BASE}/${id}`, { headers: clientIdHeaders() });
   if (!r.ok) return null;
   return r.json() as Promise<SavedGame>;
 }
 
 export async function deleteGame(id: string): Promise<void> {
-  await fetch(`${API_BASE}/${id}`, { method: "DELETE" });
+  await fetch(`${API_BASE}/${id}`, { method: "DELETE", headers: clientIdHeaders() });
 }
 
 

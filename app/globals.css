@@ -34,11 +34,13 @@ main {
 .logoPixel {
   display: grid;
   gap: 8px;
+  justify-items: center;
 }
 .logoImage {
-  width: 160px;
+  width: 230px;
   height: auto;
   image-rendering: pixelated;
+  margin: 2px auto 4px;
 }
 .logoTag {
   font-size: 48px;

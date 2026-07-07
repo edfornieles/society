@@ -362,6 +362,39 @@ ${bibleFullSummaryForModel(bible)}
 }
 
 /** Tight factual anchor for image generation — emphasizes lines invented in play, not generic worldbuilding. */
+/** The concrete subjects that recur ACROSS this society's whole canon — its
+ *  visual signature (e.g. dogs, in a society built around canine bonding). The
+ *  image system anchors on the last ~10 turns, which can drift into abstract
+ *  politics that omit the signature entirely, producing generic meeting-scene
+ *  images. Surfacing the top recurring nouns lets the prompt keep them on
+ *  screen. Frequency over the FULL changelog; simple stopword filter. */
+export function signatureSubjects(bible: SocietyBible): string[] {
+  const STOP = new Set([
+    "the","and","are","for","who","with","this","that","their","them","they","from","have","has","been","being",
+    "society","societal","citizens","citizen","people","individuals","individual","community","communities","member",
+    "members","status","social","value","values","important","most","within","into","which","when","where","what",
+    "such","other","others","those","these","some","more","also","than","then","over","under","after","before",
+    "public","private","system","concept","role","roles","group","groups","based","upon","only","must","may","can",
+    "leads","leading","led","becomes","become","known","called","seen","considered","involves","including","include",
+  ]);
+  const counts = new Map<string, number>();
+  for (const c of bible.changelog ?? []) {
+    const seen = new Set<string>();
+    for (const w of String(c.entry ?? "").toLowerCase().match(/[a-z][a-z'-]{3,}/g) ?? []) {
+      const base = w.replace(/(s|es|ies)$/i, (m) => (m === "ies" ? "y" : "")); // rough singularize
+      if (STOP.has(w) || STOP.has(base) || base.length < 4) continue;
+      if (seen.has(base)) continue; // count each line once per word
+      seen.add(base);
+      counts.set(base, (counts.get(base) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, n]) => n >= 3) // recurs in at least 3 canon lines
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([w]) => w);
+}
+
 export function bibleAnchorContextForImages(bible: SocietyBible): string {
   const core = bible.canon.coreValues.filter(Boolean).join(" | ") || "(none yet)";
   const recent = bible.changelog.slice(-10);
@@ -370,11 +403,16 @@ export function bibleAnchorContextForImages(bible: SocietyBible): string {
     : "- (no changelog lines yet)";
   const lastUser = bible.lastUserUtterance?.trim() || "(none yet)";
   const lastAi = bible.lastAiUtterance?.trim() || "(none yet)";
+  const signatures = signatureSubjects(bible);
+  const signatureBlock = signatures.length
+    ? `\nSIGNATURE ELEMENTS — these concrete subjects recur throughout this society and are its visual identity: ${signatures.join(", ")}. The scene MUST visibly feature the ones relevant to the moment being illustrated. Do NOT drift into a generic crowd/meeting/discussion scene that omits them — even an abstract development (a law, a movement, a ceremony) must be shown as a CONCRETE moment that includes ${signatures.join(" and/or ")} where they belong.`
+    : "";
   return `
 ANCHOR — facts invented in this session (image MUST be grounded here; do not invent unrelated lore):
 - Core value line(s): ${core}
 - Recent canon changelog (this is the CURATED, coherent record — quote or tight paraphrase ONLY from these for seedFacts):
 ${changelogBlock}
+${signatureBlock}
 
 Recent dialogue (context only — may contain mis-hears, background noise, or off-topic asides):
 - Last thing the human said: ${lastUser}
@@ -382,6 +420,7 @@ Recent dialogue (context only — may contain mis-hears, background noise, or of
 
 IMAGE FIDELITY (critical):
 - Anchor the scene on the MOST RECENT changelog lines above (the latest turns) — that is what the players just built, already curated and coherent. Every seedFact must trace to a CHANGELOG line or the core value.
+- Keep the SIGNATURE ELEMENTS visible: if this society is built around a concrete subject (an animal, object, place, practice), that subject must appear in the frame. A dog-centred society should show dogs; a society of hair should show hair. Never render a generic scene that could belong to any society.
 - The "last thing the human said" / "last thing the AI said" are RAW dialogue and may be garbled or unrelated to this society (e.g. a stray comment, a mis-transcription, audio from elsewhere). Use them ONLY if they are clearly consistent with the core value "${core}" and the changelog. If a line does not fit the established society, IGNORE it completely — never build the image around it. A haircut society must never produce an image about empires, war, or anything absent from its changelog.
 `.trim();
 }

@@ -6,7 +6,7 @@
 import type { SocietyBible } from "./societyBible";
 import { extractCoreTopicPhrase, normalizeCoreValueUtterance } from "./coreValueNormalize";
 import { isSpuriousUserTranscript } from "./transcriptGuards";
-import { playfulnessToneGuidance, type Playfulness } from "./prompts";
+import { playfulnessToneGuidance, signatureSubjects, type Playfulness } from "./prompts";
 
 export const ENGLISH_ONLY_INSTRUCTION =
   "ABSOLUTE RULE: Respond ONLY in English (American or British wording). Never speak Russian, Ukrainian, or any Cyrillic-script language; never German, Dutch, French, Spanish, Italian, Portuguese, or any other language — no code-switching, no mirroring the user's language, no foreign filler words. Do not use Cyrillic in speech. Stay in English even if the user has a non-English accent. No exceptions.";
@@ -536,8 +536,23 @@ function formatSessionTitle(coreChoice: string) {
 
 export function pickSessionTitle(bible: SocietyBible, parsedCore?: string, parsedTitle?: string) {
   const core0 = String(parsedCore ?? bible?.canon?.coreValues?.[0] ?? getCoreChoice(bible) ?? "").trim();
-  const formatted = formatSessionTitle(core0 || "");
-  if (formatted) return formatted;
+  // A clean short core value ("beach culture") titles the session directly. But
+  // a sentence-y core value ("citizens are those who belong to society") only
+  // truncates to a garbled 3-word title ("Citizens those who"). In that case
+  // prefer the society's dominant recurring subject — the thing the whole world
+  // is actually about (dogs, in a canine-bonding society) — which is what a
+  // player expects the game to be named after.
+  const topic = extractCoreTopicPhrase(normalizeCoreValueUtterance(core0));
+  const topicWords = topic.split(/\s+/).filter(Boolean).length;
+  if (core0 && topicWords <= 3) {
+    const formatted = formatSessionTitle(core0);
+    if (formatted) return formatted;
+  } else if (core0) {
+    const sig = signatureSubjects(bible)[0];
+    if (sig) return sig.charAt(0).toUpperCase() + sig.slice(1);
+    const formatted = formatSessionTitle(core0);
+    if (formatted) return formatted;
+  }
   if (parsedTitle) return formatSessionTitle(String(parsedTitle).trim());
 
   const genericPattern = /started a session|session started|participants have started/i;

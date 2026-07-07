@@ -238,6 +238,9 @@ export function OpenVoiceConsole({
   const [lastSaveAt, setLastSaveAt] = useState<string>("");
   const [lastSaveTitle, setLastSaveTitle] = useState<string>("");
   const [editTitle, setEditTitle] = useState<string>("");
+  // Editable core value (Settings): the agent sometimes records the core value
+  // wrong; this lets the player fix it directly and re-ground the world.
+  const [editCore, setEditCore] = useState<string>("");
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -2772,6 +2775,33 @@ export function OpenVoiceConsole({
     [bible.canon.coreValues, bible.lastUserUtterance]
   );
 
+  // Keep the editable field in sync with the current core value (on load, or
+  // when the agent sets/changes it), without stomping mid-edit.
+  const coreEditDirtyRef = useRef(false);
+  useEffect(() => {
+    if (!coreEditDirtyRef.current) setEditCore(extractCoreTopicPhrase(String(coreValueDisplay)));
+  }, [coreValueDisplay]);
+
+  const onSaveCoreValue = async () => {
+    const raw = editCore.trim();
+    if (!raw) return;
+    // Normalize the player's text into the canonical stored form (handles
+    // "dogs" -> "The most important thing in this society is dogs", etc.).
+    const normalized = normalizeCoreValueUtterance(raw);
+    bibleRef.current = structuredClone(bibleRef.current);
+    if (!Array.isArray(bibleRef.current.canon.coreValues)) bibleRef.current.canon.coreValues = [];
+    bibleRef.current.canon.coreValues[0] = normalized;
+    setBible(bibleRef.current);
+    onboardingPhaseRef.current = "done";
+    coreEditDirtyRef.current = false;
+    setEditCore(extractCoreTopicPhrase(normalized));
+    addLine("sys", `Core value updated to "${extractCoreTopicPhrase(normalized)}".`);
+    await autosave();
+    setHistory(await listGames());
+    window.dispatchEvent(new Event("society-sessions-updated"));
+    setLastSaveAt(new Date().toLocaleString());
+  };
+
   const statusText = speaking
     ? "Speaking…"
     : recording
@@ -2871,9 +2901,29 @@ export function OpenVoiceConsole({
                 </div>
               ) : null}
               {sessionId ? (
-                <label className="tag">
-                  Core value <input className="sessionTitleInput" value={coreValueDisplay} readOnly />
-                </label>
+                <div className="settingsRenameRow">
+                  <label className="tag">
+                    Core value{" "}
+                    <input
+                      className="sessionTitleInput"
+                      value={editCore}
+                      onChange={(e) => {
+                        coreEditDirtyRef.current = true;
+                        setEditCore(e.target.value);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void onSaveCoreValue();
+                        }
+                      }}
+                      placeholder="e.g. dogs"
+                    />
+                  </label>
+                  <button onClick={() => void onSaveCoreValue()} type="button">
+                    Save
+                  </button>
+                </div>
               ) : null}
               <label className="tag">
                 Play{" "}

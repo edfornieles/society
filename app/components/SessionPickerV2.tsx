@@ -32,16 +32,19 @@ export function SessionPickerV2({
       .catch(() => setListError(true));
   };
 
+  // Do NOT fetch on mount — the shared SocietyContext already loads the list
+  // once, and a second fetch here doubled the /api/sessions load on every
+  // page open (that endpoint parses every full session record, so it's the
+  // expensive one). Only listen for explicit updates and refetch when the
+  // Saved menu is actually opened.
   useEffect(() => {
-    // Load/refresh on mount
-    refresh();
     const handler = () => refresh();
     window.addEventListener("society-sessions-updated", handler);
     return () => window.removeEventListener("society-sessions-updated", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setHistory]);
 
-  // Refetch whenever the Saved menu opens so the list isn’t stale (e.g. after restarts).
+  // Refetch when the Saved menu opens so the list isn’t stale (e.g. after restarts).
   useEffect(() => {
     if (!showSaved) return;
     refresh();

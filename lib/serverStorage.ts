@@ -151,11 +151,20 @@ export async function listSessionsFromStorage(): Promise<Array<{ id: string; tit
     new ListObjectsV2Command({
       Bucket: r2Bucket,
       Prefix: "sessions/",
+      MaxKeys: 1000,
     })
   );
-  const keys = (out.Contents ?? [])
-    .map((c) => c.Key || "")
-    .filter((k) => k.endsWith(".json"));
+  // Bound the fan-out: this fetches + JSON-parses each session's FULL record
+  // (22-45KB) just to read its title/date, so the memory + subrequest cost
+  // grows with session count and can push a Worker isolate over its resource
+  // limit (Error 1102). Fetch bodies only for the most-recently-written N,
+  // using R2's LastModified (from the list, no body needed) to pick them.
+  const LIST_LIMIT = 40;
+  const contents = (out.Contents ?? [])
+    .filter((c) => (c.Key || "").endsWith(".json"))
+    .sort((a, b) => (b.LastModified?.getTime() ?? 0) - (a.LastModified?.getTime() ?? 0))
+    .slice(0, LIST_LIMIT);
+  const keys = contents.map((c) => c.Key || "");
 
   const rows = await Promise.all(
     keys.map(async (key) => {

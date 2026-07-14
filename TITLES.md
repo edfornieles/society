@@ -107,3 +107,46 @@ central to your stack), that's the capability we're most excited about.
 2. You tell us the endpoint shape (or we adapt to whatever the PoC wrapper
    exposes) → we ship `IMAGE_PROVIDER=titles` behind the existing switch.
 3. For LIFE: a short conversation about consistent-character support.
+
+---
+
+## Test-run findings (2026-07-14, verified live via Claude Code MCP)
+
+**It works end-to-end.** Connected, authenticated, generated. Key facts:
+
+- **48 tools**; the two that matter for us: `titles_generate_image`
+  (one-call text-to-image — resolves operator + signs automatically) and
+  `titles_run_execution` (any operator: edit/upscale/blend/video), plus
+  `titles_await_execution` to block until done.
+- **Timing**: 38s wall end-to-end; ~14s of actual render. Comfortably inside
+  our tolerance.
+- **Cost transparency is excellent**: the execution returned a quote —
+  `$0.052 = compute 0.040 + titles_fee 0.006 + artist royalty 0.006`.
+- **Output**: one execution returned 2 sibling images, 1024×576 PNG (16:9
+  accepted as an aspect preset). We'd want 3:2 (or 16:9 is fine).
+- On-chain provenance per output (tx_hash + node hashes) — nice for the
+  artist-royalty story.
+
+**Two integration blockers to solve together:**
+
+1. **Asset URLs are signed, expire in ~40 min, and 403 outside the
+   browser.** Our pipeline needs to fetch the bytes server-side once and
+   store them in our R2 (players view them for the life of a saved game).
+   We need either: asset URLs fetchable with the API/MCP bearer token, a
+   `download` tool that returns bytes, or longer-lived signed URLs.
+2. **Setup bug — the docs URL breaks Claude Code**: the connect page and
+   email say `https://titles.xyz/mcp`, but the OAuth metadata declares the
+   protected resource as `https://mcp.titles.xyz/mcp`. Spec-compliant
+   clients validate that match and abort before the sign-in ever opens
+   (error: "Protected resource https://mcp.titles.xyz/mcp does not match
+   expected https://titles.xyz/mcp"). Connecting directly to
+   `https://mcp.titles.xyz/mcp` works. Fix the metadata or the docs.
+
+**Style findings** (matters for Society): the catalog currently has no true
+pixel-art model, and a chosen artist model's trained look dominates the
+prompt's style instructions (our test asked for 64-bit pixel art + bold
+daylight color; the artist model returned its native low-poly night-time
+look). For Society's fixed pixel-art style we'd use a generic base
+architecture (no `model_id`); the genuinely exciting creative option is the
+inverse: let each society/life adopt a NAMED TITLES ARTIST as its visual
+identity — which is exactly what your named-artist system is for.

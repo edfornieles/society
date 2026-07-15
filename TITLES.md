@@ -174,3 +174,27 @@ content-without-style. A LoRA trained on our 87 images over the flux base
 should close the gap — flux's prompt adherence + the trained house look.
 That's the ask. (Also: catalog re-checked 2026-07-15 — still no true
 pixel-art model among the 31 hits for pixel/retro/16-bit.)
+
+## Training data (2026-07-15)
+
+Two datasets, delivered to Paul & Derrick as private signed links by email
+(links expire after 7 days — ask Ed for fresh ones anytime; they regenerate
+in a minute):
+
+1. **`society-style-training-set.zip`** (42MB) — the hand-curated cut:
+   87 style-consistent images (post July 6, 2026, after the current 16-bit
+   style guide stabilized), JPEG q92, with a manifest CSV
+   (file/session/title/caption) and a README describing the target look.
+   This is our recommendation of what the model should learn.
+2. **`society-full-corpus.zip`** (144MB) — the uncurated superset: all 278
+   images from every saved playthrough (~45 sessions, April–July 2026),
+   JPEG q92, plus `manifest.csv`/`manifest.json` with one row per image:
+   session, in-game title, caption, ISO timestamp, and — the useful part —
+   **the exact full prompt our pipeline sent to the image model** for that
+   image (style guide + canon seed facts + scene + avoid-list). Use it to
+   do your own selection, build caption pairs, or slice by era (the style
+   guide evolved; `created_at` marks the drift).
+
+The harvest is reproducible: `scripts/harvest-corpus.mjs` pulls every
+session record and image from our R2 bucket with prompts joined, so we can
+re-cut (different format, resolution, filtering) on request.

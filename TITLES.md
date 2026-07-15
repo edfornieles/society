@@ -150,3 +150,27 @@ look). For Society's fixed pixel-art style we'd use a generic base
 architecture (no `model_id`); the genuinely exciting creative option is the
 inverse: let each society/life adopt a NAMED TITLES ARTIST as its visual
 identity — which is exactly what your named-artist system is for.
+
+## Baseline test for the custom style model (2026-07-15)
+
+Decision: **v1 ships in Society's existing 16-bit house style.** We've curated
+a training set of 87 style-consistent in-game images (JPEG q92 + manifest CSV
+with per-image titles/captions) — Ed is sending it to Paul/Derrick for
+training. To scope what the trained model must fix, we ran the same real
+Society prompt (dog-society Covenant Circle scene, full style guide) two ways
+on one canvas: https://www.titles.xyz/create/9b122112-e205-4123-844f-8890286f96cb
+
+1. **`model_id` omitted** → NOTE: this does NOT fall back to a generic base;
+   TITLES auto-fits an artist model from the prompt (it picked Noisebits,
+   royalty to its creator). Result: convincing pixel-art *style*, but the
+   *content* collapsed to generic streets — no dogs, no fountain, no crowd.
+2. **`model_id: "flux-lora"` (true generic base)** → the inverse: excellent
+   content adherence (canine citizens ringing the fountain, stalls, banners,
+   humans queueing at the edge) but zero pixel art — smooth flat illustration
+   despite the explicit style guide.
+
+So the two failure modes split cleanly: style-without-content vs
+content-without-style. A LoRA trained on our 87 images over the flux base
+should close the gap — flux's prompt adherence + the trained house look.
+That's the ask. (Also: catalog re-checked 2026-07-15 — still no true
+pixel-art model among the 31 hits for pixel/retro/16-bit.)

@@ -155,12 +155,6 @@ main {
 }
 .imageProgressWrap.is-hidden { display: none; }
 .imageProgressWrap.is-visible { display: grid; }
-.imageProgressLabel {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--border);
-}
 .imageProgressTrack {
   width: 220px;
   height: 10px;

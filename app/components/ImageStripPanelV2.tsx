@@ -187,7 +187,6 @@ export function ImageStripPanelV2() {
   const progressStep = Math.min(100, Math.max(0, Math.round(imageProgress / 10) * 10));
   const progressIndicator = (
     <div className={`imageProgressWrap ${imageBusy ? "is-visible" : "is-hidden"}`}>
-      <div className="imageProgressLabel">Generating image</div>
       <div className="imageProgressTrack">
         <div className={`imageProgressBar progress-${progressStep}`} />
       </div>

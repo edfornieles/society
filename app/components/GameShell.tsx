@@ -14,8 +14,6 @@ export function GameShell() {
   const [showRules, setShowRules] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
-  const [imageBusy, setImageBusy] = useState(false);
-  const [imageProgress, setImageProgress] = useState(0);
   const [showRecapPrompt, setShowRecapPrompt] = useState(false);
   const [hasLoadedSession, setHasLoadedSession] = useState(false);
   const [resumeMode, setResumeMode] = useState<"new" | "continue" | "recap">("new");
@@ -35,40 +33,12 @@ export function GameShell() {
   const [autoEveryTurns, setAutoEveryTurns] = useState(1);
 
   useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { busy?: boolean } | undefined;
-      setImageBusy(Boolean(detail?.busy));
-    };
-    window.addEventListener("society-image-busy", handler);
-    return () => window.removeEventListener("society-image-busy", handler);
-  }, []);
-
-  useEffect(() => {
     const handler = () => {
       onNewGame();
     };
     window.addEventListener("society-reset", handler);
     return () => window.removeEventListener("society-reset", handler);
   }, []);
-
-  useEffect(() => {
-    if (!imageBusy) {
-      setImageProgress(0);
-      return;
-    }
-    setImageProgress(5);
-    const start = Date.now();
-    const durationMs = 20000;
-    const id = window.setInterval(() => {
-      const elapsed = Date.now() - start;
-      const pct = Math.min(90, Math.round((elapsed / durationMs) * 90));
-      setImageProgress(Math.max(5, pct));
-    }, 200);
-    return () => window.clearInterval(id);
-  }, [imageBusy]);
-
-
-  const progressStep = Math.min(100, Math.max(0, Math.round(imageProgress / 10) * 10));
 
   // Written recap shown in the recap modal so a returning player can read what
   // was built before deciding to recap aloud or continue.
@@ -123,12 +93,6 @@ export function GameShell() {
             </div>
           </div>
         </nav>
-        <div className={`imageProgressWrap ${imageBusy ? "is-visible" : "is-hidden"}`}>
-          <div className="imageProgressLabel">Generating image</div>
-          <div className="imageProgressTrack">
-            <div className={`imageProgressBar progress-${progressStep}`} />
-          </div>
-        </div>
         <aside className="gameSidebar">
           <OpenVoiceConsole
             showSettings={showSettings}

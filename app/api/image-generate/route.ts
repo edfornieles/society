@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     let pngBytes: Buffer;
 
     if (comfyEnabled()) {
-      const [w, h] = String(size ?? "1536x1024").split("x").map((n) => parseInt(n, 10));
+      const [w, h] = String(size ?? "1024x1024").split("x").map((n) => parseInt(n, 10));
       pngBytes = await generateImageViaComfy({
         prompt,
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
@@ -39,7 +39,7 @@ export async function POST(req: Request) {
         model: process.env.OPENAI_IMAGE_MODEL?.trim() || "gpt-image-1-mini",
         prompt,
         n: 1,
-        size: (size as any) ?? "1536x1024",
+        size: (size as any) ?? "1024x1024",
         quality: (process.env.OPENAI_IMAGE_QUALITY?.trim() as "low" | "medium" | "high") || "medium",
       });
       const b64 = img.data?.[0]?.b64_json;

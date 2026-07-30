@@ -314,7 +314,10 @@ export async function POST(req: Request) {
         model: process.env.OPENAI_IMAGE_MODEL?.trim() || "gpt-image-1-mini",
         prompt: fullPrompt,
         n: 1,
-        size: "1536x1024",
+        // Square: the same image has to work as a full-screen backdrop on both
+        // landscape desktops and portrait phones; 1024x1024 crops least badly
+        // on both (and is cheaper than 1536x1024).
+        size: "1024x1024",
         quality: (process.env.OPENAI_IMAGE_QUALITY?.trim() as "low" | "medium" | "high") || "medium",
       });
       const b64 = img.data?.[0]?.b64_json;

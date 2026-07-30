@@ -55,7 +55,7 @@ const VOICES = ["marin", "alloy", "verse", "aria", "ember"] as const;
 const DEFAULT_64BIT_STYLE_GUIDE =
   "64-bit retro pixel art (late PS1/N64-era). Crisp pixels with richer detail, broader palette, subtle dithering, strong silhouettes, readable shapes. Cozy cinematic framing translated into pixel art. No photorealism, no vector/flat icons, no smooth gradients. No readable text/logos/watermarks.";
 
-const IMAGE_SIZE = "1536x1024";
+const IMAGE_SIZE = "1024x1024";
 // Server-VAD turn-end silence. Keep this intentionally high so the model
 // doesn't jump in during natural thinking pauses.
 const USER_TURN_SILENCE_MS = 6000;

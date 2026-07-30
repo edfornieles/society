@@ -15,6 +15,36 @@ export function ImageStripPanelV2() {
   const [recapActive, setRecapActive] = useState(false);
   const [imageAlert, setImageAlert] = useState<string>("");
   const [imageRenderFailed, setImageRenderFailed] = useState(false);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageProgress, setImageProgress] = useState(0);
+
+  // "Generating image" indicator, rendered as part of the caption stack so it
+  // sits directly above the chapter text box (moved here from GameShell's
+  // fixed top-right overlay).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { busy?: boolean } | undefined;
+      setImageBusy(Boolean(detail?.busy));
+    };
+    window.addEventListener("society-image-busy", handler);
+    return () => window.removeEventListener("society-image-busy", handler);
+  }, []);
+
+  useEffect(() => {
+    if (!imageBusy) {
+      setImageProgress(0);
+      return;
+    }
+    setImageProgress(5);
+    const start = Date.now();
+    const durationMs = 20000;
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - start;
+      const pct = Math.min(90, Math.round((elapsed / durationMs) * 90));
+      setImageProgress(Math.max(5, pct));
+    }, 200);
+    return () => window.clearInterval(id);
+  }, [imageBusy]);
 
   useEffect(() => {
     // During a recap the narration drives which image shows (via
@@ -115,7 +145,7 @@ export function ImageStripPanelV2() {
       const r = await fetch(withBase("/api/image-generate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: img.promptUsed, size: "1536x1024", sessionId }),
+        body: JSON.stringify({ prompt: img.promptUsed, size: "1024x1024", sessionId }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || !data?.b64) {
@@ -154,6 +184,16 @@ export function ImageStripPanelV2() {
   const coreChoice = extractCoreTopicPhrase(String(bible.canon.coreValues?.[0] ?? "").trim());
   const showPrompt = introStarted && !coreChoice;
   const showCoreChoiceUntilImage = introStarted && coreChoice && images.length === 0;
+  const progressStep = Math.min(100, Math.max(0, Math.round(imageProgress / 10) * 10));
+  const progressIndicator = (
+    <div className={`imageProgressWrap ${imageBusy ? "is-visible" : "is-hidden"}`}>
+      <div className="imageProgressLabel">Generating image</div>
+      <div className="imageProgressTrack">
+        <div className={`imageProgressBar progress-${progressStep}`} />
+      </div>
+    </div>
+  );
+
   const rawCaption = current?.caption?.trim() ?? "";
   const captionText = rawCaption ? rawCaption.replace(/\?/g, "").trim() : "";
   const fallbackDescription =
@@ -190,6 +230,8 @@ export function ImageStripPanelV2() {
               </picture>
             )}
           </div>
+          <div className="captionStack">
+          {progressIndicator}
           <div className="floatingCaption">
             <div className="floatingTitle integratedTitle floatingTitleRow">
               <span>{current.title}</span>
@@ -238,6 +280,7 @@ export function ImageStripPanelV2() {
               </small>
             ) : null}
           </div>
+          </div>
         </>
       ) : (
         <>
@@ -253,6 +296,8 @@ export function ImageStripPanelV2() {
           </picture>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img alt="Society logo" src={withBase("/society_logo.png")} className="centerLogo" />
+          <div className="captionStack">
+          {progressIndicator}
           <div className="floatingCaption">
             {!introStarted ? (
                   <p className="welcomeBody">
@@ -275,6 +320,7 @@ export function ImageStripPanelV2() {
                   : "WHAT IS THE MOST IMPORTANT THING IN YOUR SOCIETY?"}
               </p>
             )}
+          </div>
           </div>
         </>
       )}

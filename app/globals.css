@@ -905,14 +905,32 @@ hr {
   .card {
     padding: 8px;
   }
-  /* Slim down the voice console: the waveform box is the biggest space hog. */
+  /* Slim down the voice console to a single row: [Start ▣][~waveform~].
+     The card's other children (status text, captions, errors) wrap onto
+     full-width rows of their own below. */
+  .gameSidebar > .card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .gameSidebar > .card > * {
+    flex: 1 1 100%;
+  }
+  .gameSidebar > .card > .vcHeaderRow {
+    flex: 0 0 auto;
+  }
+  .gameSidebar > .card > .liveTranscript {
+    flex: 1 1 0;
+    min-width: 0;
+  }
   .liveTranscript {
-    margin-top: 8px;
-    padding: 6px;
+    margin-top: 0;
+    padding: 4px;
     min-height: 0;
   }
   .aiWave {
-    height: 36px;
+    height: 34px;
     box-shadow: 3px 3px 0 var(--shadow);
   }
   .micButtonLarge {

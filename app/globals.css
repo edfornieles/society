@@ -857,3 +857,142 @@ hr {
 .logoButton:active {
   transform: translate(1px, 1px);
 }
+
+/* ---------------------------------------------------------------------------
+   Mobile layout (phones / narrow screens).
+   Desktop pins the menu + voice console as a fixed left-hand column over the
+   full-screen stage image. On a phone there is no room for that: the panels
+   become normal stacked flow content that scrolls, while the stage image
+   stays behind as a fixed backdrop and the caption pins to the bottom edge.
+   This block is LAST in the file on purpose — it must override both the base
+   rules and the Chromium/Safari @supports blocks above. */
+@media (max-width: 768px) {
+  .gameLayout {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+    padding: 8px 8px 60vh;
+    /* Large bottom padding = the stage artwork owns most of the screen below
+       the compact controls, and content can scroll clear of the caption. */
+    min-height: 100svh;
+  }
+  .topNav,
+  .gameSidebar {
+    position: static;
+    width: auto;
+    max-width: none;
+    min-width: 0;
+  }
+  .topNav {
+    padding: 6px 8px 8px;
+  }
+  /* The stage shows the big centered SOCIETY logo on the welcome screen, so
+     the nav logo is redundant on a phone — every pixel goes to the artwork. */
+  .topNav .logoButton {
+    display: none;
+  }
+  /* All four menu buttons on one compact row. */
+  .hudNav {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+  }
+  .gameSidebar {
+    font-size: 14px;
+  }
+  .card {
+    padding: 8px;
+  }
+  /* Slim down the voice console: the waveform box is the biggest space hog. */
+  .liveTranscript {
+    margin-top: 8px;
+    padding: 6px;
+    min-height: 0;
+  }
+  .aiWave {
+    height: 36px;
+    box-shadow: 3px 3px 0 var(--shadow);
+  }
+  .micButtonLarge {
+    font-size: 13px;
+    padding: 8px 14px;
+  }
+  .voiceStatusRow {
+    margin-top: 6px;
+  }
+  .voiceCaption {
+    margin-top: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  /* The stage stays as a fixed full-viewport backdrop behind the flow. */
+  .gameStage {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+  }
+  .centerLogo {
+    top: auto;
+    bottom: 24vh;
+    transform: translateX(-50%);
+    width: clamp(200px, 64vw, 340px);
+  }
+  .floatingCaption {
+    left: 10px;
+    right: 10px;
+    transform: none;
+    width: auto;
+    max-width: none;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    padding: 10px 12px;
+    box-shadow: 4px 4px 0 var(--shadow);
+    text-align: center;
+  }
+  .floatingTitle {
+    font-size: 13px;
+  }
+  .floatingCaption p {
+    font-size: 14px;
+  }
+  /* Image-generation progress: top-right collides with the menu panel on a
+     phone; tuck it just above the bottom caption instead. */
+  .imageProgressWrap {
+    top: auto;
+    right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    z-index: 30;
+  }
+  .imageProgressTrack {
+    width: 150px;
+  }
+  /* The Saved button is the right-hand column of the 2x2 grid, so a
+     left-anchored dropdown runs off the screen edge — anchor it right. */
+  .savedMenu .sessionCard {
+    left: auto;
+    right: 0;
+    width: min(320px, calc(100vw - 60px));
+  }
+  .modalOverlay {
+    padding: 10px;
+  }
+  .modalCard {
+    width: 100%;
+    max-height: calc(100svh - 20px);
+    padding: 12px;
+  }
+  /* 16px minimum stops iOS Safari from auto-zooming the page when the text
+     input is focused. */
+  .textInputBox,
+  .sessionTitleInput {
+    font-size: 16px;
+  }
+  .hudNav button {
+    padding: 8px 2px;
+    font-size: 8px;
+  }
+  .textChatLog {
+    max-height: 40svh;
+  }
+}

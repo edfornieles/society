@@ -176,12 +176,18 @@ export function ImageStripPanelV2() {
                 onError={() => setImageRenderFailed(true)}
               />
             ) : (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                alt="Image unavailable"
-                src={withBase("/welcome-society.png")}
-                className="stageImageForeground"
-              />
+              <picture>
+                <source
+                  media="(max-width: 768px) and (orientation: portrait)"
+                  srcSet={withBase("/welcome-society-mobile.png")}
+                />
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  alt="Image unavailable"
+                  src={withBase("/welcome-society.png")}
+                  className="stageImageForeground"
+                />
+              </picture>
             )}
           </div>
           <div className="floatingCaption">
@@ -235,8 +241,16 @@ export function ImageStripPanelV2() {
         </>
       ) : (
         <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img alt="Welcome To Society" src={withBase("/welcome-society.png")} className="stageImageFull" />
+          {/* Portrait phones get the dedicated mobile crop of the welcome
+              artwork; everything else keeps the landscape original. */}
+          <picture>
+            <source
+              media="(max-width: 768px) and (orientation: portrait)"
+              srcSet={withBase("/welcome-society-mobile.png")}
+            />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img alt="Welcome To Society" src={withBase("/welcome-society.png")} className="stageImageFull" />
+          </picture>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img alt="Society logo" src={withBase("/society_logo.png")} className="centerLogo" />
           <div className="floatingCaption">

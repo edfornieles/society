@@ -327,6 +327,14 @@ export function OpenVoiceConsole({
   // speaks, so the user can talk over it). monitorRafRef drives the single
   // continuous VAD loop; the old per-utterance open/close is gone.
   const monitorRafRef = useRef<number | null>(null);
+  // The VAD tick, called from the PCM tap's onaudioprocess (~11x/sec). It was
+  // previously self-scheduled with requestAnimationFrame — which browsers
+  // PAUSE for occluded windows and throttle aggressively on mobile Safari, so
+  // the whole turn-taking state machine silently froze ("Waiting for you to
+  // speak" while the player talks; observed live on desktop: calibration got
+  // 1 sample and the loop ticked exactly once). The audio callback keeps
+  // firing regardless of page visibility, so it is the reliable driver.
+  const monitorTickRef = useRef<(() => void) | null>(null);
   // Guards reacquireMic against overlapping runs (track.onended firing while a
   // reacquire is already in flight would double-open the mic).
   const micReacquiringRef = useRef(false);
@@ -1995,6 +2003,8 @@ export function OpenVoiceConsole({
           const extra = pcmChunksRef.current.length - prerollChunks;
           if (extra > 0) pcmChunksRef.current.splice(0, extra);
         }
+        // Drive the VAD state machine from the audio graph (see monitorTickRef).
+        monitorTickRef.current?.();
       };
       pcmProcessorRef.current = processor;
       pcmSilentGainRef.current = silent;
@@ -2022,6 +2032,7 @@ export function OpenVoiceConsole({
   };
 
   const closeMic = () => {
+    monitorTickRef.current = null; // stop the audio-driven VAD tick
     if (monitorRafRef.current !== null) {
       cancelAnimationFrame(monitorRafRef.current);
       monitorRafRef.current = null;
@@ -2042,6 +2053,24 @@ export function OpenVoiceConsole({
     setRecordingSync(false);
     stopWaveformLoop();
   };
+
+  /** Coming back to the page (phone unlock, app switch, tab refocus) can leave
+   *  the AudioContext suspended or the mic track dead — iOS especially. The
+   *  audio-driven VAD tick only runs while the context runs, so kick both back
+   *  to life the moment the page is visible again. */
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!activeRef.current) return;
+      const ctx = sharedAudioContextRef.current;
+      if (ctx && ctx.state === "suspended") void ctx.resume().catch(() => {});
+      const track = micStreamRef.current?.getAudioTracks()[0];
+      if (track && track.readyState === "ended") void reacquireMic();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** Tear down and reopen a dead mic capture. The OS can kill or permanently
    *  mute the track (sleep/wake, AirPods connecting, input-device switch)
@@ -2137,8 +2166,7 @@ export function OpenVoiceConsole({
         if (speakingRef.current) {
           calibrationStartRef.current = now;
           calibrationSamplesRef.current = [];
-          monitorRafRef.current = requestAnimationFrame(tick);
-          return;
+          return; // next audio callback re-enters
         }
         calibrationSamplesRef.current.push(rms);
         if (now - (calibrationStartRef.current ?? now) >= VAD_CALIBRATION_MS) {
@@ -2334,12 +2362,15 @@ export function OpenVoiceConsole({
 
       // Draw the mic-reactive waveform whenever the model isn't speaking
       // (during speech, playBlob's own loop drives the canvas from the TTS).
+      // ~11 paints/sec from the audio cadence — chunky, which suits the look.
       if (!speakingRef.current) {
         paintBars(a, freqBuffer);
       }
-      monitorRafRef.current = requestAnimationFrame(tick);
     };
-    monitorRafRef.current = requestAnimationFrame(tick);
+    // Registered for the PCM tap to call; no rAF self-scheduling (see
+    // monitorTickRef — rAF pauses on occluded/backgrounded pages and froze
+    // the whole state machine).
+    monitorTickRef.current = tick;
   };
 
   /** Start recording a user utterance. The continuous PCM tap (see openMic)

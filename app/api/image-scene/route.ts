@@ -134,24 +134,41 @@ function hasStrongAnchorOverlap(seedFacts: string[], line: string): boolean {
  *  proposal that would render a near-duplicate of the session's latest image:
  *  seedFacts are drawn from the changelog, so when a turn adds real new canon
  *  the fact lists diverge and similarity drops well below the threshold. */
+function factTokens(facts: string[]): Set<string> {
+  return new Set(
+    facts
+      .join(" ")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 3)
+  );
+}
+
 function seedFactsSimilarity(a: string[], b: string[]): number {
-  const tokens = (facts: string[]) =>
-    new Set(
-      facts
-        .join(" ")
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, " ")
-        .split(/\s+/)
-        .filter((w) => w.length > 3)
-    );
-  const ta = tokens(a);
-  const tb = tokens(b);
+  const ta = factTokens(a);
+  const tb = factTokens(b);
   if (ta.size === 0 || tb.size === 0) return 0;
   let overlap = 0;
   ta.forEach((w) => {
     if (tb.has(w)) overlap += 1;
   });
   return overlap / (ta.size + tb.size - overlap);
+}
+
+/** Asymmetric containment: what fraction of `line`'s tokens already appear in
+ *  `facts`. Jaccard is wrong for "is this one line covered by that list?" —
+ *  the list's size dominates the union and the score can never clear a
+ *  meaningful bar. Containment measures exactly the question asked. */
+function lineCoveredByFacts(line: string, facts: string[]): number {
+  const tl = factTokens([line]);
+  const tf = factTokens(facts);
+  if (tl.size === 0 || tf.size === 0) return 0;
+  let covered = 0;
+  tl.forEach((w) => {
+    if (tf.has(w)) covered += 1;
+  });
+  return covered / tl.size;
 }
 
 export async function POST(req: Request) {
@@ -317,27 +334,31 @@ export async function POST(req: Request) {
       lastSeedFacts.length > 0 &&
       seedFacts.length > 0;
     if (skipEligible) {
-      const similarity = seedFactsSimilarity(seedFacts, lastSeedFacts.map(String));
-      if (similarity >= 0.8) {
-        // Before skipping, check whether the CANON actually moved on: the
-        // proposal model sometimes re-anchors on the previous scene even when
-        // a fresh concrete fact exists (observed live). If the newest concrete
-        // canon line is NOT already covered by the last image's facts, the
-        // right move is to re-anchor the image on that new fact and render —
-        // only a truly unchanged scene gets skipped.
-        const newestFact = pickConcreteCanonLine(bible);
-        const newestCovered =
-          !newestFact || seedFactsSimilarity([newestFact], lastSeedFacts.map(String)) >= 0.5;
-        if (newestCovered) {
-          return NextResponse.json({
-            skipped: true,
-            similarity: Number(similarity.toFixed(2)),
-            title,
-            caption,
-            seedFacts,
-            styleGuide: resolvedStyleGuide,
-          });
-        }
+      const last = lastSeedFacts.map(String);
+      const similarity = seedFactsSimilarity(seedFacts, last);
+      // The decisive question is whether the CANON moved since the last image:
+      // the newest concrete canon line already being covered by the previous
+      // image's facts means the turn added nothing new to draw. The Jaccard
+      // similarity is a secondary guard with a deliberately loose threshold —
+      // the proposal model paraphrases the same facts differently across runs
+      // (observed live: the identical scene scored 0.88 one run, <0.8 the
+      // next), while a genuinely different-aspect proposal shares only stray
+      // vocabulary and lands well below 0.65.
+      const newestFact = pickConcreteCanonLine(bible);
+      const newestCovered = !newestFact || lineCoveredByFacts(newestFact, last) >= 0.6;
+      if (newestCovered && similarity >= 0.65) {
+        return NextResponse.json({
+          skipped: true,
+          similarity: Number(similarity.toFixed(2)),
+          title,
+          caption,
+          seedFacts,
+          styleGuide: resolvedStyleGuide,
+        });
+      }
+      // Canon moved but the proposal re-anchored on the previous scene anyway
+      // (observed live): render the NEW fact instead of a near-duplicate.
+      if (!newestCovered && similarity >= 0.8) {
         title = compactTitleFromLine(newestFact);
         caption = cleanCaption(newestFact);
         imagePrompt = [

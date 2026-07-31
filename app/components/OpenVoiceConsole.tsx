@@ -257,7 +257,12 @@ export function OpenVoiceConsole({
   // the VAD needs ~120ms of sustained speech before it triggers, and a recorder
   // started at that moment amputated every word's head ("robotics" → "botox").
   const pcmChunksRef = useRef<Float32Array[]>([]);
-  const pcmProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  // AudioWorkletNode when supported (audio-thread tap — the main-thread
+  // ScriptProcessorNode made the WHOLE audio graph, TTS playback included,
+  // glitch whenever the main thread janked, e.g. decoding a freshly arrived
+  // 1MB scene PNG mid-reply: "the voice keeps breaking mid sentence").
+  // ScriptProcessorNode remains as the fallback for browsers without worklets.
+  const pcmProcessorRef = useRef<ScriptProcessorNode | AudioWorkletNode | null>(null);
   const pcmSilentGainRef = useRef<GainNode | null>(null);
   const pcmSampleRateRef = useRef<number>(0);
   // Speculative STT (see VAD_STT_SPECULATE_MS): the transcription fired during
@@ -1985,20 +1990,12 @@ export function OpenVoiceConsole({
       source.connect(analyser);
       micSourceRef.current = source;
       analyserRef.current = analyser;
-      // Continuous PCM tap with rolling pre-roll (see pcmChunksRef). The
-      // processor must be connected toward the destination to fire in all
-      // browsers — via a zero-gain node so the mic is never audible.
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      const silent = ctx.createGain();
-      silent.gain.value = 0;
-      source.connect(processor);
-      processor.connect(silent);
-      silent.connect(ctx.destination);
+      // Continuous PCM tap with rolling pre-roll (see pcmChunksRef).
       pcmSampleRateRef.current = ctx.sampleRate;
       const prerollChunks = Math.max(2, Math.ceil((ctx.sampleRate * 0.4) / 4096));
       pcmChunksRef.current = [];
-      processor.onaudioprocess = (e) => {
-        pcmChunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      const onPcmChunk = (chunk: Float32Array) => {
+        pcmChunksRef.current.push(chunk);
         if (!recordingRef.current) {
           const extra = pcmChunksRef.current.length - prerollChunks;
           if (extra > 0) pcmChunksRef.current.splice(0, extra);
@@ -2006,7 +2003,69 @@ export function OpenVoiceConsole({
         // Drive the VAD state machine from the audio graph (see monitorTickRef).
         monitorTickRef.current?.();
       };
-      pcmProcessorRef.current = processor;
+      const silent = ctx.createGain();
+      silent.gain.value = 0;
+      if (typeof ctx.audioWorklet?.addModule === "function") {
+        // AudioWorklet tap: runs on the AUDIO thread, so the graph never
+        // waits on the main thread. The old main-thread ScriptProcessorNode
+        // was part of the rendering graph — any main-thread jank (decoding a
+        // freshly arrived ~1MB scene PNG mid-reply, React commits) glitched
+        // ALL audio on the shared context, heard as the voice breaking up
+        // mid-sentence. The worklet batches 4096-sample chunks (~85ms at
+        // 48kHz) and posts them over; the VAD cadence is unchanged.
+        const workletSrc = `
+          class SocietyTap extends AudioWorkletProcessor {
+            constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; }
+            process(inputs) {
+              const ch = inputs[0] && inputs[0][0];
+              if (ch && ch.length) {
+                let i = 0;
+                while (i < ch.length) {
+                  const take = Math.min(4096 - this.n, ch.length - i);
+                  this.buf.set(ch.subarray(i, i + take), this.n);
+                  this.n += take; i += take;
+                  if (this.n === 4096) {
+                    const out = this.buf.slice(0);
+                    this.port.postMessage(out, [out.buffer]);
+                    this.n = 0;
+                  }
+                }
+              }
+              return true;
+            }
+          }
+          registerProcessor("society-tap", SocietyTap);`;
+        const moduleUrl = URL.createObjectURL(new Blob([workletSrc], { type: "application/javascript" }));
+        try {
+          await ctx.audioWorklet.addModule(moduleUrl);
+        } finally {
+          URL.revokeObjectURL(moduleUrl);
+        }
+        const tap = new AudioWorkletNode(ctx, "society-tap", {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+        source.connect(tap);
+        tap.connect(silent);
+        silent.connect(ctx.destination);
+        tap.port.onmessage = (e: MessageEvent) => {
+          if (e.data instanceof Float32Array) onPcmChunk(e.data);
+        };
+        pcmProcessorRef.current = tap;
+      } else {
+        // Fallback for browsers without AudioWorklet: the legacy main-thread
+        // ScriptProcessor tap (must be connected toward the destination to
+        // fire in all browsers — via zero gain so the mic is never audible).
+        const processor = ctx.createScriptProcessor(4096, 1, 1);
+        source.connect(processor);
+        processor.connect(silent);
+        silent.connect(ctx.destination);
+        processor.onaudioprocess = (e) => {
+          onPcmChunk(new Float32Array(e.inputBuffer.getChannelData(0)));
+        };
+        pcmProcessorRef.current = processor;
+      }
       pcmSilentGainRef.current = silent;
       // After system sleep or an input-device switch the OS kills the capture
       // track — without this handler the VAD loop keeps reading zeros forever
@@ -2037,7 +2096,9 @@ export function OpenVoiceConsole({
       cancelAnimationFrame(monitorRafRef.current);
       monitorRafRef.current = null;
     }
-    pcmProcessorRef.current?.disconnect();
+    const tap = pcmProcessorRef.current;
+    if (tap && "port" in tap) tap.port.onmessage = null;
+    tap?.disconnect();
     pcmProcessorRef.current = null;
     pcmSilentGainRef.current?.disconnect();
     pcmSilentGainRef.current = null;

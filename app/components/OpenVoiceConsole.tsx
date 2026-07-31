@@ -264,6 +264,9 @@ export function OpenVoiceConsole({
   // the end-of-turn hold. endCapture consumes it instead of transcribing fresh.
   const specSttPromiseRef = useRef<Promise<string> | null>(null);
   const specSttFiredRef = useRef(false);
+  // Speculative fires within the CURRENT capture — drives the escalating
+  // duty-cycle in fireSpeculativeStt (cost control; see comment there).
+  const specFireCountRef = useRef(0);
   // Resolved speculative transcript, if it has arrived — the VAD loop reads it
   // at hold expiry to decide semantically whether the turn is really over.
   const specSttTextRef = useRef<string | null>(null);
@@ -1367,9 +1370,22 @@ export function OpenVoiceConsole({
       const r = await fetch(withBase("/api/image-scene"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bible: bibleRef.current, styleGuide: imageStyleGuide, sessionId: requestSessionId }),
+        body: JSON.stringify({
+          bible: bibleRef.current,
+          styleGuide: imageStyleGuide,
+          sessionId: requestSessionId,
+          // Lets the server skip rendering a near-duplicate of the latest
+          // image (same anchoring facts) instead of spending an image call.
+          lastSeedFacts: images[images.length - 1]?.seedFacts ?? [],
+        }),
       });
       const data = await r.json().catch(() => ({}));
+      if (data?.skipped) {
+        // Scene unchanged since the last image — server saved the render cost.
+        // Not a failure: don't set the failure ref, just keep the current image.
+        addLine("sys", `Image skipped: scene unchanged (similarity ${String(data?.similarity ?? "?")}).`);
+        return;
+      }
       if (!r.ok || (!data?.b64 && !data?.imagePath)) {
         const detail = `${String(data?.error ?? r.status)}${data?.code ? ` (${String(data.code)})` : ""}`;
         addLine("sys", `Image scene error: ${detail}`);
@@ -2339,6 +2355,7 @@ export function OpenVoiceConsole({
     silenceSinceRef.current = null;
     specSttFiredRef.current = false;
     specSttPromiseRef.current = null;
+    specFireCountRef.current = 0;
     lastSpecFireAtRef.current = 0; // fresh utterance, fresh duty-cycle
     setRecordingSync(true);
     if (typeof window !== "undefined" && ((window as any).__VAD_DEBUG ?? process.env.NODE_ENV !== "production")) {
@@ -2381,16 +2398,24 @@ export function OpenVoiceConsole({
    *  with the still-running end-of-turn hold (see VAD_STT_SPECULATE_MS). */
   const fireSpeculativeStt = () => {
     if (specSttFiredRef.current) return;
-    // Duty-cycle: each speculative fire re-encodes and re-uploads the ENTIRE
-    // utterance so far — on a rambling turn with a pause every half-second
-    // that was one full-length Whisper call per pause. A short cooldown keeps
-    // the latency benefit (the hold is 600ms; worst case the transcript lands
-    // ~300ms later on rapid pause-resume-pause patterns) while cutting the
-    // redundant calls to at most ~1 per second of speech.
-    if (Date.now() - lastSpecFireAtRef.current < 900) return;
+    // Escalating duty-cycle: each speculative fire re-encodes and re-uploads
+    // the ENTIRE utterance so far, and Whisper bills per audio-minute
+    // SUBMITTED — so a rambling turn with a pause every second was billing
+    // 2-3x the actual speech length. The first two fires keep the original
+    // snappy 900ms cooldown (the common case: one pause, one fire, full
+    // latency win). From the third fire on — by then this is a long pausey
+    // ramble, and each re-upload is at its most expensive — the cooldown
+    // stretches to 2.5s, with a hard cap of 4 fires per capture. If the cap
+    // starves the semantic end-of-turn check of a transcript, the turn just
+    // takes the existing grace path and endCapture transcribes once, fresh:
+    // slightly slower on pathological rambles, never wrong.
+    const fires = specFireCountRef.current;
+    if (fires >= 4) return;
+    if (Date.now() - lastSpecFireAtRef.current < (fires < 2 ? 900 : 2500)) return;
     const sampleRate = pcmSampleRateRef.current;
     if (!pcmChunksRef.current.length || !sampleRate) return;
     specSttFiredRef.current = true;
+    specFireCountRef.current = fires + 1;
     lastSpecFireAtRef.current = Date.now();
     setTranscribing(true);
     // slice() → a stable snapshot; the tap keeps appending (only trailing

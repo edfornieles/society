@@ -476,7 +476,7 @@ Visual guidelines:
 - Style is ALWAYS 64-bit pixel art: crisp pixels, richer palette, subtle dithering, strong silhouettes, readable shapes.
 - Dark, unsettling, eerie, macabre, and grotesque-but-fictional imagery is welcome and encouraged when canon supports it — do not sanitize a dark or strange society into a cheerful one. Suggestion, aftermath, and symbolism read as "dark" without needing graphic detail.
 - Avoid graphic gore/mutilation and explicit sexual content or nudity — not a tone restriction, purely because the image safety filter will reject the whole generation and the player loses that turn's image.
-- The image is a WIDE LANDSCAPE frame (3:2, wider than tall) — compose accordingly: think establishing shot / environmental scene, not a centered portrait crop. Use the extra width for setting and context around the main action, not empty padding. Contains no readable text.
+- The image is a SQUARE frame (1:1) shown full-screen on both landscape and portrait displays — compose accordingly: keep the main action and key subjects in the CENTER of the frame (the edges get cropped on some screens), with setting and context filling the frame around them. Contains no readable text.
 - Default to ethnic diversity among people shown unless the user/canon explicitly indicates otherwise.
 
 Bible summary:

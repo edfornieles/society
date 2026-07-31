@@ -130,16 +130,45 @@ function hasStrongAnchorOverlap(seedFacts: string[], line: string): boolean {
   return overlap >= 2;
 }
 
+/** Token-set Jaccard similarity between two seedFacts lists. Used to detect a
+ *  proposal that would render a near-duplicate of the session's latest image:
+ *  seedFacts are drawn from the changelog, so when a turn adds real new canon
+ *  the fact lists diverge and similarity drops well below the threshold. */
+function seedFactsSimilarity(a: string[], b: string[]): number {
+  const tokens = (facts: string[]) =>
+    new Set(
+      facts
+        .join(" ")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 3)
+    );
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let overlap = 0;
+  ta.forEach((w) => {
+    if (tb.has(w)) overlap += 1;
+  });
+  return overlap / (ta.size + tb.size - overlap);
+}
+
 export async function POST(req: Request) {
   try {
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
     }
 
-    const { bible, styleGuide, sessionId } = (await req.json().catch(() => ({}))) as {
+    const { bible, styleGuide, sessionId, lastSeedFacts, force } = (await req.json().catch(() => ({}))) as {
       bible?: SocietyBible;
       styleGuide?: string;
       sessionId?: string;
+      /** seedFacts of the session's most recent image — used to skip rendering
+       *  a near-duplicate scene (see the skip gate below). */
+      lastSeedFacts?: string[];
+      /** Player explicitly asked for an image — never skip. */
+      force?: boolean;
     };
 
     if (!bible) {
@@ -270,6 +299,54 @@ export async function POST(req: Request) {
 
     if (!imagePrompt) {
       return NextResponse.json({ error: "No image prompt in scene proposal", parsed }, { status: 500 });
+    }
+
+    // Skip gate (cost control): if this proposal is anchored on essentially the
+    // same facts as the session's LATEST image, rendering it again buys nothing
+    // — the player would see a near-duplicate. Return skipped instead of
+    // spending the image call. Conservative on purpose: never skips when the
+    // player explicitly asked (force), when a rewrite above re-anchored the
+    // scene on fresh input (those signal new content), or below a high
+    // similarity bar. The proposal LLM has already run either way; only the
+    // image render is saved.
+    const skipEligible =
+      !force &&
+      !looksLikeOnboardingMeta &&
+      !missingLatestAnchor &&
+      Array.isArray(lastSeedFacts) &&
+      lastSeedFacts.length > 0 &&
+      seedFacts.length > 0;
+    if (skipEligible) {
+      const similarity = seedFactsSimilarity(seedFacts, lastSeedFacts.map(String));
+      if (similarity >= 0.8) {
+        // Before skipping, check whether the CANON actually moved on: the
+        // proposal model sometimes re-anchors on the previous scene even when
+        // a fresh concrete fact exists (observed live). If the newest concrete
+        // canon line is NOT already covered by the last image's facts, the
+        // right move is to re-anchor the image on that new fact and render —
+        // only a truly unchanged scene gets skipped.
+        const newestFact = pickConcreteCanonLine(bible);
+        const newestCovered =
+          !newestFact || seedFactsSimilarity([newestFact], lastSeedFacts.map(String)) >= 0.5;
+        if (newestCovered) {
+          return NextResponse.json({
+            skipped: true,
+            similarity: Number(similarity.toFixed(2)),
+            title,
+            caption,
+            seedFacts,
+            styleGuide: resolvedStyleGuide,
+          });
+        }
+        title = compactTitleFromLine(newestFact);
+        caption = cleanCaption(newestFact);
+        imagePrompt = [
+          `Depict a single concrete in-world moment from this newly established fact: "${newestFact}".`,
+          `Show a specific person doing a specific action with specific objects in a specific place, mid-motion.`,
+          `Do not reuse the previous scene's setting or subjects; this image is about the NEW fact.`,
+          `BANNED: generic crowd discussions, abstract "society values X" illustrations, scenic filler.`,
+        ].join("\n");
+      }
     }
 
     // Anti-medieval enforcement at the FINAL prompt (not just the scene LLM):
